@@ -6,55 +6,47 @@ metadata:
     app.kubernetes.io/name: datasciencecluster
 spec:
   components:
-    # -- AI Pipelines (Kubeflow Pipelines) --
-    aipipelines:
-      managementState: Managed
-    # -- RHOAI Dashboard --
+    aipipelines: {}
     dashboard:
       managementState: Managed
-    # -- Feast Operator (feature store) --
     feastoperator:
-      managementState: Managed
-    # -- KServe (model serving) + MaaS --
+      managementState: Removed
     kserve:
       managementState: Managed
       modelsAsService:
         managementState: Managed
       nim:
+        airGapped: false
         managementState: Managed
       rawDeploymentServiceConfig: Headed
-    # -- Kueue (job queueing) --
+      wva:
+        managementState: Removed
     kueue:
       defaultClusterQueueName: default
       defaultLocalQueueName: default
       managementState: Removed
-    # -- LlamaStack Operator (required for GenAI Studio) --
     llamastackoperator:
       managementState: Managed
-    # -- MLflow Operator --
     mlflowoperator:
-      managementState: Managed
-    # -- Model Registry --
+      managementState: Removed
     modelregistry:
-      managementState: Managed
+      managementState: Removed
       registriesNamespace: rhoai-model-registries
-    # -- Ray (distributed computing) --
     ray:
-      managementState: Managed
-    # -- Trainer --
+      managementState: Removed
+    sparkoperator:
+      managementState: Removed
     trainer:
       managementState: Removed
-    # -- Training Operator --
     trainingoperator:
-      managementState: Managed
-    # -- TrustyAI (evaluation) --
+      managementState: Removed
     trustyai:
       eval:
         lmeval:
           permitCodeExecution: deny
           permitOnline: deny
-      managementState: Managed
-    # -- Workbenches (Jupyter notebooks) --
+      managementState: Removed
+      mcpGuardrailsMode: false
     workbenches:
       managementState: Managed
       workbenchNamespace: rhods-notebooks
