@@ -36,7 +36,10 @@ spec:
           - --ssl-certfile=/var/run/kserve/tls/tls.crt
           - --ssl-keyfile=/var/run/kserve/tls/tls.key
           - --enable-force-include-usage
-          - --max-model-len=4096
+          - --max-model-len=2048
+        env:
+          - name: VLLM_CPU_KVCACHE_SPACE
+            value: "2"
         ports:
           - containerPort: 8000
             name: http
@@ -61,8 +64,8 @@ spec:
           failureThreshold: 30
         resources:
           requests:
-            cpu: "1"
-            memory: 2Gi
+            cpu: "2"
+            memory: 6Gi
           limits:
             cpu: "4"
-            memory: 4Gi
+            memory: 12Gi
