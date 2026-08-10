@@ -1,0 +1,12 @@
+apiVersion: maas.opendatahub.io/v1alpha1
+kind: MaaSModelRef
+metadata:
+  name: qwen25-05b-instruct
+  namespace: llm
+  annotations:
+    openshift.io/display-name: "Qwen 2.5 0.5B Instruct"
+    openshift.io/description: "Lightweight instruct model running on CPU via vLLM"
+spec:
+  modelRef:
+    kind: LLMInferenceService
+    name: qwen25-05b-instruct
