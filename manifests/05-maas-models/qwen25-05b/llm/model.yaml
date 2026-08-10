@@ -36,7 +36,7 @@ spec:
           - --ssl-certfile=/var/run/kserve/tls/tls.crt
           - --ssl-keyfile=/var/run/kserve/tls/tls.key
           - --enable-force-include-usage
-          - --max-model-len=2048
+          - --max-model-len=4096
         env:
           - name: VLLM_CPU_KVCACHE_SPACE
             value: "2"
