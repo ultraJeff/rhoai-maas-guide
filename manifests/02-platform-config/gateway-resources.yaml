@@ -17,3 +17,7 @@ data:
               limits:
                 cpu: "2"
                 memory: 2Gi
+  horizontalPodAutoscaler: |
+    spec:
+      minReplicas: 1
+      maxReplicas: 2
