@@ -119,6 +119,22 @@ Phase 7 tries to install Tempo/OpenTelemetry/COO into dedicated namespaces, but 
 oc apply -k manifests/07-observability/telemetry/
 ```
 
+### 13. MaaS Gateway HPA — Limit Replicas
+
+The OpenShift Gateway Controller creates an HPA with min=2 max=10 by default. On a lab cluster this scales to 10 replicas on startup CPU spikes. The HPA is owned by the Gateway and can't be patched directly — the controller reverts it.
+
+**Fix:** The parametersRef ConfigMap supports a `horizontalPodAutoscaler` key (same pattern as `deployment` and `service`). Added to `manifests/02-platform-config/gateway-resources.yaml`:
+
+```yaml
+data:
+  horizontalPodAutoscaler: |
+    spec:
+      minReplicas: 1
+      maxReplicas: 2
+```
+
+> **Note:** Gateway annotations like `gateway.istio.io/autoscale-min` and `autoscaling.istio.io/minReplicas` do NOT work — the OpenShift Gateway Controller ignores them. Only the ConfigMap key works.
+
 ## Open Issues
 
 - **RHOAI Observability "Cluster" dashboard** shows "No datasource found for kind 'PrometheusDatasource' and name 'undefined'" — missing Perses datasource for the cluster/model panels
