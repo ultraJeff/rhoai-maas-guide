@@ -135,17 +135,32 @@ data:
 
 > **Note:** Gateway annotations like `gateway.istio.io/autoscale-min` and `autoscaling.istio.io/minReplicas` do NOT work — the OpenShift Gateway Controller ignores them. Only the ConfigMap key works.
 
-### 14. Missing Perses Datasources (RHOAI Operator Bug)
+### 14. Missing Perses Datasources (RHOAI 3.4.x Bug — Fixed in 3.5 EA)
 
-The RHOAI operator tries to create `PersesDatasource` CRs for the observability dashboard but fails silently because its manifests omit the `namespace` field in `spec.client.tls.caCert`, which the v1alpha2 CRD validation requires. Error: `namespace is required when type is secret or configmap`.
+The RHOAI 3.4.x operator tries to create `PersesDatasource` CRs but fails because its manifests omit the `namespace` field in `spec.client.tls.caCert`, which the v1alpha2 CRD validation requires. This causes the monitoring controller to spam errors every ~500ms.
 
-**Fix:** Manually create both datasources with the correct namespace field:
+**Fix:** Upgrade to RHOAI 3.5.0-ea.2 (beta channel). The beta channel has no upgrade path from 3.4.x — you must delete the subscription and recreate it:
 
 ```bash
-oc apply -k manifests/07-observability/datasources/
+oc delete subscription rhods-operator -n redhat-ods-operator
+oc delete csv rhods-operator.3.4.3 -n redhat-ods-operator
+oc apply -f - <<EOF
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: rhods-operator
+  namespace: redhat-ods-operator
+spec:
+  channel: beta
+  installPlanApproval: Automatic
+  name: rhods-operator
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace
+  startingCSV: rhods-operator.3.5.0-ea.2
+EOF
 ```
 
-This creates `prometheus-datasource` (default, for cluster/model dashboards) and `tempo-datasource` (for traces) in `redhat-ods-monitoring`.
+The 3.5 operator creates all datasources correctly and the observability dashboard works.
 
 ### 15. Missing `prometheus-web-tls-ca` Secret
 
