@@ -35,6 +35,7 @@ log_error() { echo -e "${RED}[ERROR]${NC} $*"; }
 
 MODEL="auto"
 DRY_RUN=false
+DISCONNECTED=${DISCONNECTED:-false}
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -43,6 +44,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --dry-run) DRY_RUN=true; shift ;;
+        --disconnected) DISCONNECTED=true; shift ;;
         -h|--help)
             cat <<EOF
 Usage: $0 [OPTIONS]
@@ -50,17 +52,21 @@ Usage: $0 [OPTIONS]
 Options:
   --model <name>  Model to deploy (default: auto)
                   Available models:
-                    simulator       CPU-only mock model (~256Mi RAM)
-                    granite-tiny-gpu  Granite 4.0-h-tiny FP8 (1 GPU, 24Gi RAM)
-                    gpt-oss-20b     OpenAI gpt-oss-20b (1 GPU, 60Gi RAM)
-                    auto            Auto-detect based on GPU VRAM (default)
+                    simulator                CPU-only mock model (~256Mi RAM)
+                    simulator-disconnected   CPU-only mock for air-gapped clusters (oci:// URI)
+                    granite-tiny-gpu         Granite 4.0-h-tiny FP8 (1 GPU, 24Gi RAM)
+                    gpt-oss-20b              OpenAI gpt-oss-20b (1 GPU, 60Gi RAM)
+                    gemma                    Gemma 2 9B IT FP8 (1 GPU, 24Gi RAM)
+                    auto                     Auto-detect based on GPU VRAM (default)
+  --disconnected  Use disconnected-compatible variants (oci:// URIs)
   --dry-run       Preview without applying
   -h, --help      Show this help message
 
 Auto-detection rules:
-  - No GPU node             -> simulator
+  - No GPU node             -> simulator (or simulator-disconnected with --disconnected)
   - GPU VRAM >= 40 GiB      -> gpt-oss-20b
-  - GPU VRAM <  40 GiB      -> granite-tiny-gpu
+  - GPU VRAM >= 16 GiB      -> gemma
+  - GPU VRAM <  16 GiB      -> granite-tiny-gpu
 EOF
             exit 0
             ;;
@@ -99,19 +105,27 @@ if [ "$MODEL" = "auto" ]; then
     GPU_MEMORY=$(oc get nodes -o jsonpath='{.items[*].metadata.labels.nvidia\.com/gpu\.memory}' 2>/dev/null | tr ' ' '\n' | sort -rn | head -1)
 
     if [ -z "$GPU_MEMORY" ]; then
-        log_info "No GPU nodes detected, selecting simulator"
-        MODEL="simulator"
+        if [ "$DISCONNECTED" = true ]; then
+            log_info "No GPU nodes detected (disconnected mode), selecting simulator-disconnected"
+            MODEL="simulator-disconnected"
+        else
+            log_info "No GPU nodes detected, selecting simulator"
+            MODEL="simulator"
+        fi
     elif [ "$GPU_MEMORY" -ge 40960 ] 2>/dev/null; then
         log_info "GPU VRAM: ${GPU_MEMORY} MiB (>= 40960), selecting gpt-oss-20b"
         MODEL="gpt-oss-20b"
+    elif [ "$GPU_MEMORY" -ge 16384 ] 2>/dev/null; then
+        log_info "GPU VRAM: ${GPU_MEMORY} MiB (>= 16384), selecting gemma"
+        MODEL="gemma"
     else
-        log_info "GPU VRAM: ${GPU_MEMORY} MiB (< 40960), selecting granite-tiny-gpu"
+        log_info "GPU VRAM: ${GPU_MEMORY} MiB (< 16384), selecting granite-tiny-gpu"
         MODEL="granite-tiny-gpu"
     fi
 fi
 
 # Validate selected model
-VALID_MODELS="simulator granite-tiny-gpu gpt-oss-20b"
+VALID_MODELS="simulator simulator-disconnected granite-tiny-gpu gpt-oss-20b gemma"
 if ! echo "$VALID_MODELS" | grep -qw "$MODEL"; then
     log_error "Unknown model: $MODEL"
     log_error "Valid models: $VALID_MODELS"

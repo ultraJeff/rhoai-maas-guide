@@ -1,0 +1,125 @@
+# ImageSetConfiguration for MaaS on a disconnected RHOAI cluster.
+#
+# Mirrors every operator rhoai-maas-guide needs, including the ones RHOAI
+# itself requires (rhods-operator, cert-manager, OSSM3, NFD, GPU). A single
+# oc-mirror run with this config produces ONE catalog index that covers both
+# RHOAI and MaaS - no need to merge catalogs afterwards.
+#
+# Usage (on a connected jump box):
+#   oc-mirror --v2 \
+#     --config manifests/00-disconnected/imageset-config-maas.yaml \
+#     file:///mnt/mirror/maas-mirror
+#
+# The archive (.tar) is then transferred to the disconnected side and pushed:
+#   oc-mirror --v2 \
+#     --from /mnt/mirror/maas-mirror \
+#     docker://<mirror-registry>:<port>/<namespace>
+#
+# oc-mirror produces IDMS, ITMS and CatalogSource YAMLs in working-dir/cluster-resources/.
+# Apply them to the cluster so OLM can find the operators.
+#
+# Adjust OCP_VERSION below to match the cluster's minor version.
+apiVersion: mirror.openshift.io/v2alpha1
+kind: ImageSetConfiguration
+mirror:
+  operators:
+    # -- Red Hat operator catalog -----------------------------------------------
+    # Replace the tag with a digest for fully offline disk-to-mirror:
+    #   skopeo inspect --raw docker://registry.redhat.io/redhat/redhat-operator-index:v4.20 \
+    #     | jq -r '.digest'
+    - catalog: registry.redhat.io/redhat/redhat-operator-index:v4.20
+      packages:
+        # RHOAI and its hard prerequisites
+        - name: rhods-operator
+          defaultChannel: stable-3.4
+          channels:
+            - name: stable-3.4
+        - name: openshift-cert-manager-operator
+          defaultChannel: stable-v1
+          channels:
+            - name: stable-v1
+        - name: servicemeshoperator3
+          defaultChannel: stable
+          channels:
+            - name: stable
+        - name: nfd
+          defaultChannel: stable
+          channels:
+            - name: stable
+
+        # MaaS-specific operators
+        - name: rhcl-operator
+          defaultChannel: stable
+          channels:
+            - name: stable
+        - name: limitador-operator
+          defaultChannel: stable
+          channels:
+            - name: stable
+        - name: authorino-operator
+          defaultChannel: stable
+          channels:
+            - name: stable
+        - name: dns-operator
+          defaultChannel: stable
+          channels:
+            - name: stable
+        - name: leader-worker-set
+          defaultChannel: stable-v1.0
+          channels:
+            - name: stable-v1.0
+        - name: metallb-operator
+          defaultChannel: stable
+          channels:
+            - name: stable
+
+        # Observability stack
+        - name: cluster-observability-operator
+          defaultChannel: stable
+          channels:
+            - name: stable
+        - name: opentelemetry-product
+          defaultChannel: stable
+          channels:
+            - name: stable
+        - name: tempo-product
+          defaultChannel: stable
+          channels:
+            - name: stable
+
+    # -- Certified operator catalog ---------------------------------------------
+    - catalog: registry.redhat.io/redhat/certified-operator-index:v4.20
+      packages:
+        - name: gpu-operator-certified
+          defaultChannel: stable
+          channels:
+            - name: stable
+
+  # Images not discoverable through operator bundles' relatedImages.
+  # Modelcar images, the PostgreSQL database, vLLM runtime, WASM shim and simulator.
+  #
+  # WASM shim note: the RHCL operator's CSV includes a RELATED_IMAGE_WASMSHIM
+  # env var pointing to the shim image. The gateway pod fetches it via OCI at
+  # runtime, bypassing IDMS/ITMS. To find the digest for your RHCL version:
+  #   oc get csv -n openshift-operators \
+  #     -l operators.coreos.com/rhcl-operator.openshift-operators \
+  #     -o jsonpath='{range .items[0].spec.install.spec.deployments[0].spec.template.spec.containers[0].env[*]}{.name}={.value}{"\n"}{end}' \
+  #     | grep RELATED_IMAGE_WASMSHIM
+  additionalImages:
+    # MaaS PostgreSQL database (pinned by digest)
+    - name: registry.redhat.io/rhel9/postgresql-16@sha256:3943bfa5de044d8f033df148c0409ed826171b779f3cf3ddf537a1914960ab57
+    # vLLM CUDA runtime - included explicitly because separate oc-mirror runs
+    # for RHOAI vs MaaS place it in different mirror namespaces. The digest
+    # matches the RHOAI 3.4.2 operator's relatedImages entry.
+    - name: registry.redhat.io/rhaii/vllm-cuda-rhel9@sha256:5800e12b2a465f15961fcf34b645d79ed4f91ec9161eab22b1205d12682183c8
+    # RHCL/Kuadrant WASM shim - the gateway fetches this via OCI protocol
+    # which does NOT respect IDMS/ITMS. Source registry is
+    # registry.access.redhat.com (not registry.redhat.io).
+    # Replace <WASM_SHIM_DIGEST> with the digest from the command above.
+    - name: registry.access.redhat.com/rhcl-1/wasm-shim-rhel9@sha256:<WASM_SHIM_DIGEST>
+    # Simulator runtime (non-Red Hat, must be mirrored explicitly)
+    - name: ghcr.io/llm-d/llm-d-inference-sim:v0.7.1
+    # Model weights - OCI modelcar images
+    - name: registry.redhat.io/rhai/modelcar-granite-4-0-h-tiny-fp8-dynamic:3.0
+    - name: registry.redhat.io/rhelai1/modelcar-gpt-oss-20b:1.5
+    - name: registry.redhat.io/rhelai1/modelcar-gemma-2-9b-it-fp8:1.5

@@ -289,8 +289,6 @@ oc patch gateway maas-default-gateway -n openshift-ingress --type=merge -p '{
   }
 }'
 ----
-
-This is tracked in link:https://redhat.atlassian.net/browse/RHOAIENG-68589[RHOAIENG-68589].
 ====
 
 *Step 5d:* Label namespaces for Gateway route binding

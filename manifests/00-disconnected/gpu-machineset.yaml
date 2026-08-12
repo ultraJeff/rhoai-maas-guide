@@ -1,0 +1,76 @@
+# GPU MachineSet for model serving on AWS.
+#
+# Before applying, discover the cluster-specific values and render:
+#
+#   export INFRA_ID=$(oc get -o jsonpath='{.status.infrastructureName}' infrastructure cluster)
+#   export AMI=$(oc get machineset -n openshift-machine-api -o jsonpath='{.items[0].spec.template.spec.providerSpec.value.ami.id}')
+#   export SUBNET=$(oc get machineset -n openshift-machine-api -o jsonpath='{.items[0].spec.template.spec.providerSpec.value.subnet.id}')
+#   export REGION=$(oc get machineset -n openshift-machine-api -o jsonpath='{.items[0].spec.template.spec.providerSpec.value.placement.region}')
+#   export AZ=$(oc get machineset -n openshift-machine-api -o jsonpath='{.items[0].spec.template.spec.providerSpec.value.placement.availabilityZone}')
+#   export INSTANCE_TYPE=g5.2xlarge   # or g5.12xlarge for 4xA10G (96GB VRAM)
+#   export MS_NAME=${INFRA_ID}-gpu-${AZ}
+#   export IAM_PROFILE=${INFRA_ID}-worker-profile
+#   export SG=${INFRA_ID}-node
+#
+#   envsubst < manifests/00-disconnected/gpu-machineset.yaml | oc apply -f -
+#
+# Instance types:
+#   g5.2xlarge   1x A10G  (24 GB VRAM) - fits Gemma 9B FP8, Granite tiny
+#   g5.12xlarge  4x A10G  (96 GB VRAM) - fits GPT-oss-20b and larger models
+apiVersion: machine.openshift.io/v1beta1
+kind: MachineSet
+metadata:
+  name: ${MS_NAME}
+  namespace: openshift-machine-api
+  labels:
+    machine.openshift.io/cluster-api-cluster: ${INFRA_ID}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      machine.openshift.io/cluster-api-cluster: ${INFRA_ID}
+      machine.openshift.io/cluster-api-machineset: ${MS_NAME}
+  template:
+    metadata:
+      labels:
+        machine.openshift.io/cluster-api-cluster: ${INFRA_ID}
+        machine.openshift.io/cluster-api-machine-role: gpu
+        machine.openshift.io/cluster-api-machine-type: gpu
+        machine.openshift.io/cluster-api-machineset: ${MS_NAME}
+    spec:
+      metadata:
+        labels:
+          node-role.kubernetes.io/gpu: ""
+      taints:
+        - key: nvidia.com/gpu
+          effect: NoSchedule
+      providerSpec:
+        value:
+          apiVersion: machine.openshift.io/v1beta1
+          kind: AWSMachineProviderConfig
+          ami:
+            id: ${AMI}
+          instanceType: ${INSTANCE_TYPE}
+          placement:
+            availabilityZone: ${AZ}
+            region: ${REGION}
+          subnet:
+            id: ${SUBNET}
+          iamInstanceProfile:
+            id: ${IAM_PROFILE}
+          securityGroups:
+            - filters:
+                - name: tag:Name
+                  values:
+                    - ${SG}
+          tags:
+            - name: kubernetes.io/cluster/${INFRA_ID}
+              value: owned
+          userDataSecret:
+            name: worker-user-data
+          credentialsSecret:
+            name: aws-cloud-credentials
+          blockDevices:
+            - ebs:
+                volumeSize: 200
+                volumeType: gp3

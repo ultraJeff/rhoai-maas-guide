@@ -222,3 +222,7 @@ www/
 .cache/antora/
 node_modules/
 rhoai-maas-guide.code-workspace
+.serena/
+
+# macOS
+.DS_Store

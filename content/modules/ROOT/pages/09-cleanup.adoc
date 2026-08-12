@@ -1,0 +1,197 @@
+= Cleanup & Teardown
+
+Remove {maas} and its dependencies from your OpenShift cluster.
+
+== Automated Cleanup
+
+The cleanup script reverses `setup-maas.sh` in reverse order, checking whether each resource exists before deleting.
+
+[source,bash]
+----
+./scripts/cleanup-maas.sh
+----
+
+The script prompts for confirmation before deleting anything. Pass `--yes` to skip the prompt.
+
+=== Options
+
+[cols="1,3", options="header"]
+|===
+| Flag | Description
+
+| `--dry-run`
+| Preview what would be deleted without actually deleting
+
+| `--keep-operators`
+| Skip operator removal (Phase 7) - useful when you only want to tear down models and config
+
+| `--from-phase <N>`
+| Start from a specific cleanup phase (1-7)
+
+| `--yes`
+| Skip the confirmation prompt
+|===
+
+=== Cleanup Phases
+
+The script runs these phases in order:
+
+[cols="1,2,3", options="header"]
+|===
+| Phase | Name | What it removes
+
+| 1
+| External Models
+| ExternalModel CRs, provider API key secrets, `external-models` namespace
+
+| 2
+| Observability
+| Telemetry policies, COO / OpenTelemetry / Tempo operators and namespaces
+
+| 3
+| Models
+| MaaSSubscription, MaaSAuthPolicy, MaaSModelRef, LLMInferenceService, `llm` namespace
+
+| 4
+| RHOAI Configuration
+| OdhDashboardConfig, DataScienceCluster, DSCInitialization
+
+| 5
+| MaaS Platform
+| PostgreSQL deployment / PVC / service, `postgres-creds` and `maas-db-config` secrets
+
+| 6
+| Platform Configuration
+| Gateway, GatewayClass, Route, Kuadrant CR, user workload monitoring config, MetalLB (if installed)
+
+| 7
+| Operators
+| RHCL, cert-manager, LWS, RHOAI subscriptions / CSVs, operator namespaces, RHOAI-managed namespaces
+|===
+
+=== Examples
+
+Preview what would be deleted:
+
+[source,bash]
+----
+./scripts/cleanup-maas.sh --dry-run
+----
+
+Remove models and config but keep operators installed:
+
+[source,bash]
+----
+./scripts/cleanup-maas.sh --keep-operators
+----
+
+Remove only the operators (everything else already cleaned up):
+
+[source,bash]
+----
+./scripts/cleanup-maas.sh --from-phase 7
+----
+
+== Manual Cleanup
+
+If you prefer to remove resources selectively, follow these steps in order.
+
+=== Remove Models
+
+[source,bash]
+----
+# Delete MaaS governance CRs
+oc delete maassubscription --all -n models-as-a-service --ignore-not-found
+oc delete maasauthpolicy --all -n models-as-a-service --ignore-not-found
+oc delete maasmodelref --all -n llm --ignore-not-found
+
+# Delete model serving
+oc delete llminferenceservice --all -n llm --ignore-not-found
+
+# Delete model namespace
+oc delete namespace llm --ignore-not-found
+----
+
+=== Remove RHOAI Configuration
+
+[source,bash]
+----
+oc delete odhdashboardconfig odh-dashboard-config -n redhat-ods-applications --ignore-not-found
+oc delete datasciencecluster default-dsc --ignore-not-found
+oc delete dscinitialization default-dsci --ignore-not-found
+----
+
+=== Remove MaaS Platform (PostgreSQL)
+
+[source,bash]
+----
+oc delete deployment postgres -n redhat-ods-applications --ignore-not-found
+oc delete service postgres -n redhat-ods-applications --ignore-not-found
+oc delete pvc postgres-data -n redhat-ods-applications --ignore-not-found
+oc delete secret postgres-creds maas-db-config -n redhat-ods-applications --ignore-not-found
+----
+
+=== Remove Gateway and Kuadrant
+
+[source,bash]
+----
+# Gateway resources
+oc delete route maas-default-gateway-https -n openshift-ingress --ignore-not-found
+oc delete gateway maas-default-gateway -n openshift-ingress --ignore-not-found
+oc delete configmap maas-gateway-options -n openshift-ingress --ignore-not-found
+oc delete gatewayclass openshift-default --ignore-not-found
+
+# Kuadrant
+oc delete kuadrant kuadrant -n kuadrant-system --ignore-not-found
+oc delete namespace kuadrant-system --ignore-not-found
+----
+
+=== Remove Operators
+
+Delete subscriptions first, then CSVs, then namespaces:
+
+[source,bash]
+----
+# RHCL (shared openshift-operators namespace - only delete the subscription and CSVs)
+oc delete subscription rhcl-operator -n openshift-operators --ignore-not-found
+oc delete csv -n openshift-operators -l operators.coreos.com/rhcl-operator.openshift-operators= --ignore-not-found
+
+# cert-manager
+oc delete subscription openshift-cert-manager-operator -n cert-manager-operator --ignore-not-found
+oc delete csv --all -n cert-manager-operator --ignore-not-found
+oc delete namespace cert-manager-operator --ignore-not-found
+
+# Leader Worker Set
+oc delete subscription leader-worker-set -n openshift-lws-operator --ignore-not-found
+oc delete csv --all -n openshift-lws-operator --ignore-not-found
+oc delete namespace openshift-lws-operator --ignore-not-found
+
+# RHOAI (last - manages many resources)
+oc delete subscription rhods-operator -n redhat-ods-operator --ignore-not-found
+oc delete csv --all -n redhat-ods-operator --ignore-not-found
+oc delete namespace redhat-ods-operator --ignore-not-found
+----
+
+Wait 60 seconds for the RHOAI operator to clean up managed resources, then remove its namespaces:
+
+[source,bash]
+----
+oc delete namespace redhat-ods-applications --ignore-not-found
+oc delete namespace redhat-ods-monitoring --ignore-not-found
+oc delete namespace rhods-notebooks --ignore-not-found
+oc delete namespace rhoai-model-registries --ignore-not-found
+oc delete namespace models-as-a-service --ignore-not-found
+----
+
+== What Is Not Removed
+
+The cleanup script does not remove:
+
+- Pre-existing namespaces (`openshift-operators`, `openshift-monitoring`, `openshift-ingress`)
+- GPU operators (NFD, NVIDIA GPU Operator) - these are installed separately
+- CRDs left behind by operators (OLM does not remove CRDs on operator deletion)
+- Persistent data in external storage (e.g., if you used an external PostgreSQL)
+
+== Next step
+
+To reinstall, run `./scripts/setup-maas.sh` - see xref:quick-start.adoc[Automated Setup].

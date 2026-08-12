@@ -1,0 +1,542 @@
+= Phase 0: Disconnected Setup
+
+Additional steps to deploy {rhoai} {maas} on an air-gapped (disconnected) {ocp-short} cluster.
+
+IMPORTANT: This phase is only needed for disconnected environments where the cluster has no internet access. For connected clusters, skip directly to xref:01-prerequisites.adoc[Phase 1].
+
+== Overview
+
+A disconnected {ocp-short} cluster pulls all container images from a private mirror registry instead of the public registries. Before deploying MaaS, the operator catalogs and container images must be mirrored to that registry.
+
+This guide assumes:
+
+* {ocp-short} 4.20+ is already installed in disconnected mode
+* {rhoai} 3.4 operators are installed (rhods-operator, cert-manager, OSSM3, NFD, GPU operator)
+* A mirror registry is running and the cluster trusts its CA
+* ImageDigestMirrorSet (IDMS) and CatalogSources from the RHOAI mirror are already applied
+
+The MaaS guide adds 9 operators and several container images that are NOT part of the base RHOAI mirror set. This phase mirrors those extra components.
+
+TIP: Currently, `oc-mirror` mirrors all images referenced in the RHOAI operator bundle regardless of which DSC components you enable. There is an initiative (link:https://redhat.atlassian.net/browse/RHOAIENG-75890[RHOAIENG-75890] / link:https://redhat.atlassian.net/browse/OCPSTRAT-3350[OCPSTRAT-3350]) to support selective mirroring - so you can mirror only the images for the components you need (e.g. Dashboard + MaaS). Until that lands, this guide mirrors the full set.
+
+== MaaS operators to mirror
+
+[cols="1,1,1", options="header"]
+|===
+| Operator | Package Name | Purpose
+
+| Red Hat Connectivity Link
+| `rhcl-operator`
+| API gateway, auth (Authorino), rate limiting (Limitador)
+
+| Authorino Operator
+| `authorino-operator`
+| Auth engine (RHCL dependency, required >= 1.4.2)
+
+| DNS Operator
+| `dns-operator`
+| DNS policy (RHCL dependency, required >= 1.4.1)
+
+| Limitador Operator
+| `limitador-operator`
+| Rate limiting engine (RHCL dependency, required >= 1.4.1)
+
+| Leader Worker Set
+| `leader-worker-set`
+| Distributed inference coordination
+
+| MetalLB
+| `metallb-operator`
+| LoadBalancer service for the MaaS gateway
+
+| Cluster Observability Operator
+| `cluster-observability-operator`
+| Monitoring stack
+
+| OpenTelemetry
+| `opentelemetry-product`
+| Distributed tracing
+
+| Tempo
+| `tempo-product`
+| Trace storage backend
+|===
+
+== Additional images to mirror
+
+IMPORTANT: The vLLM CUDA runtime is published under `registry.redhat.io/rhaii/` (double 'i', no trailing 's'). Some upstream references incorrectly use `rhaiis/` - this will fail on disconnected clusters because the IDMS only covers `rhaii/`. The model manifests in this guide already use the correct `rhaii/` path with a pinned digest. See link:https://redhat.atlassian.net/browse/RHOAIENG-82814[RHOAIENG-82814].
+
+Images not discoverable through operator bundles:
+
+[cols="1,2", options="header"]
+|===
+| Image | Purpose
+
+| `registry.redhat.io/rhel9/postgresql-16@sha256:3943...` (pinned digest)
+| MaaS PostgreSQL database
+
+| `registry.redhat.io/rhaii/vllm-cuda-rhel9@sha256:5800...` (pinned digest)
+| vLLM CUDA runtime for GPU models
+
+| `registry.access.redhat.com/rhcl-1/wasm-shim-rhel9@sha256:...` (pinned digest)
+| Kuadrant WASM shim for gateway auth and rate limiting (see <<wasm-shim>>)
+
+| `ghcr.io/llm-d/llm-d-inference-sim:v0.7.1`
+| Simulator runtime (CPU-only model)
+
+| `registry.redhat.io/rhai/modelcar-granite-4-0-h-tiny-fp8-dynamic:3.0`
+| Granite 4.0-h-tiny model weights
+
+| `registry.redhat.io/rhelai1/modelcar-gpt-oss-20b:1.5`
+| GPT-oss-20b model weights
+
+| `registry.redhat.io/rhelai1/modelcar-gemma-2-9b-it-fp8:1.5`
+| Gemma 2 9B IT FP8 model weights
+|===
+
+IMPORTANT: The WASM shim image lives on `registry.access.redhat.com` (not `registry.redhat.io`). This is a different registry. The WASM shim digest changes with each RHCL operator version - see <<wasm-shim>> for how to discover it.
+
+== Mirroring workflow
+
+[[mirroring-step1]]
+=== Step 1: Mirror the MaaS content
+
+An `ImageSetConfiguration` is provided at `manifests/00-disconnected/imageset-config-maas.yaml`. It includes all 11 operators ({rhoai} base + MaaS) and the additional images listed above.
+
+Before running oc-mirror, discover the WASM shim digest for your RHCL version and update the ImageSetConfiguration:
+
+[source,bash]
+----
+# If RHCL is already installed on a connected cluster, get the digest:
+oc get csv -n openshift-operators \
+  -l operators.coreos.com/rhcl-operator.openshift-operators \
+  -o jsonpath='{range .items[0].spec.install.spec.deployments[0].spec.template.spec.containers[0].env[*]}{.name}={.value}{"\n"}{end}' \
+  | grep RELATED_IMAGE_WASMSHIM
+
+# Replace the placeholder in imageset-config-maas.yaml with the digest
+----
+
+On a connected system (jump box) with `oc-mirror` v2 and a valid pull secret:
+
+[source,bash]
+----
+# Set the staging directory (needs ~100 GB free for the MaaS operators)
+export WORKDIR=/mnt/mirror/maas-mirror
+
+# Run oc-mirror to disk
+oc-mirror --v2 \
+  --config manifests/00-disconnected/imageset-config-maas.yaml \
+  file://${WORKDIR}
+----
+
+TIP: If the RHOAI operators are already mirrored, oc-mirror only downloads the 6 new MaaS operators and the additional images. The run is incremental.
+
+=== Step 2: Transfer to the disconnected side
+
+Transfer the archive to the disconnected host. Use `rsync` for resumable transfers:
+
+[source,bash]
+----
+rsync -avP --append ${WORKDIR}/ user@highside:/mnt/mirror/maas-mirror/
+----
+
+=== Step 3: Push to the mirror registry
+
+On the disconnected host, push the content into the mirror registry:
+
+[source,bash]
+----
+oc-mirror --v2 \
+  --from /mnt/mirror/maas-mirror \
+  docker://<mirror-registry>:<port>/<namespace>
+----
+
+This produces IDMS/ITMS and CatalogSource files in `working-dir/cluster-resources/`.
+
+=== Step 4: Apply cluster resources
+
+Apply the generated resources to the cluster:
+
+[source,bash]
+----
+# Apply the IDMS (triggers a MachineConfig rollout - nodes will reboot)
+oc apply -f /mnt/mirror/maas-mirror/working-dir/cluster-resources/idms-oc-mirror.yaml
+
+# Apply the CatalogSource
+oc apply -f /mnt/mirror/maas-mirror/working-dir/cluster-resources/cs-*.yaml
+----
+
+If the cluster already has a CatalogSource alias named `redhat-operators`, update it to point to the new catalog index image (which now includes the MaaS operators):
+
+[source,bash]
+----
+# Get the new catalog image from the generated CatalogSource
+NEW_IMAGE=$(grep 'image:' /mnt/mirror/maas-mirror/working-dir/cluster-resources/cs-redhat-operator-index-*.yaml | awk '{print $2}' | head -1)
+
+# Update the alias
+oc patch catalogsource redhat-operators -n openshift-marketplace \
+  --type=merge -p "{\"spec\":{\"image\":\"${NEW_IMAGE}\"}}"
+----
+
+=== Step 5: Create ITMS for modelcar images
+
+`oc-mirror` creates ImageDigestMirrorSet (IDMS) entries for images referenced by digest, but OCI modelcar images use tags (e.g. `:3.0`, `:1.5`). CRI-O needs an ImageTagMirrorSet (ITMS) to redirect tag-based pulls to the mirror registry.
+
+A ready-to-use ITMS manifest is provided at `manifests/00-disconnected/itms-maas-modelcars.yaml`. It covers `rhai/`, `rhelai1/`, `registry.access.redhat.com/rhcl-1/`, and `ghcr.io/llm-d` namespaces.
+
+Check if ITMS entries already exist:
+
+[source,bash]
+----
+oc get imagetagmirrorset -o yaml | grep -E 'registry.redhat.io/rhai|registry.redhat.io/rhelai1'
+----
+
+If no ITMS entries exist, apply the manifest (replace the placeholder with your mirror address):
+
+[source,bash]
+----
+sed 's|MIRROR_REGISTRY:PORT/NAMESPACE|<your-registry>:<port>/<ns>|g' \
+  manifests/00-disconnected/itms-maas-modelcars.yaml | oc apply -f -
+----
+
+Replace `<your-registry>:<port>/<ns>` with your mirror registry address (the same one used in Step 3).
+
+IMPORTANT: Applying ITMS triggers a MachineConfig update. Worker nodes will reboot in a rolling fashion. Wait for `oc get mcp worker` to show `UPDATED=True` before continuing.
+
+TIP: Batch all ITMS/IDMS changes into a single `oc apply`. Do not add them incrementally - each apply triggers a separate MachineConfig rollout with node reboots.
+
+[[wasm-shim]]
+=== Step 6: Patch RHCL for WASM shim
+
+The Kuadrant/RHCL WASM shim is loaded at runtime by the Envoy gateway pod using the OCI protocol. This fetch does **not** go through CRI-O and does **not** respect IDMS/ITMS/ICSP. On a disconnected cluster, the gateway tries to reach `registry.access.redhat.com` directly. When it fails, Kuadrant applies a deny-all RBAC filter and every request returns "RBAC: access denied".
+
+The fix is to set the `RELATED_IMAGE_WASMSHIM` environment variable on the RHCL operator subscription, which tells the operator to serve the shim from the mirrored image via its internal cluster service instead of having the gateway fetch it from the public registry.
+
+First, find the WASM shim digest from the installed RHCL CSV:
+
+[source,bash]
+----
+WASM_IMAGE=$(oc get csv -n openshift-operators \
+  -l operators.coreos.com/rhcl-operator.openshift-operators \
+  -o jsonpath='{range .items[0].spec.install.spec.deployments[0].spec.template.spec.containers[0].env[*]}{.name}={.value}{"\n"}{end}' \
+  | grep RELATED_IMAGE_WASMSHIM | cut -d= -f2)
+echo "WASM shim image: $WASM_IMAGE"
+----
+
+Build the mirrored image reference (replace the source registry with your mirror):
+
+[source,bash]
+----
+# Extract the digest from the image reference
+WASM_DIGEST=$(echo "$WASM_IMAGE" | grep -o 'sha256:.*')
+
+# Build the mirrored reference
+MIRROR_REGISTRY="<your-registry>:<port>/<ns>"
+WASM_MIRROR="${MIRROR_REGISTRY}/rhcl-1/wasm-shim-rhel9@${WASM_DIGEST}"
+echo "Mirrored WASM shim: $WASM_MIRROR"
+----
+
+Patch the RHCL subscription:
+
+[source,bash]
+----
+oc patch subscription rhcl-operator -n openshift-operators --type=merge -p "{
+  \"spec\": {
+    \"config\": {
+      \"env\": [{
+        \"name\": \"RELATED_IMAGE_WASMSHIM\",
+        \"value\": \"${WASM_MIRROR}\"
+      }]
+    }
+  }
+}"
+----
+
+Wait for the RHCL operator pod to restart with the new env var:
+
+[source,bash]
+----
+oc get pods -n openshift-operators -l app.kubernetes.io/name=kuadrant-operator -w
+----
+
+After the operator restarts, delete the gateway pod so it picks up the new WASM shim location:
+
+[source,bash]
+----
+oc delete pod -n openshift-ingress -l istio.io/gateway-name=maas-default-gateway
+----
+
+NOTE: If the mirror registry uses a self-signed CA, the gateway pod may fail with a TLS certificate error when fetching the WASM shim. Ensure the mirror registry CA is in the cluster's proxy/trust bundle (`oc get proxy/cluster -o jsonpath='{.spec.trustedCA.name}'`).
+
+== Verification
+
+Confirm all MaaS operators are available:
+
+[source,bash]
+----
+for pkg in rhcl-operator authorino-operator dns-operator limitador-operator \
+           leader-worker-set metallb-operator \
+           cluster-observability-operator opentelemetry-product tempo-product; do
+  echo -n "  $pkg: "
+  oc get packagemanifest "$pkg" -n openshift-marketplace \
+    -o jsonpath='{.status.catalogSource}' 2>/dev/null && echo || echo "NOT FOUND"
+done
+----
+
+All 9 should resolve to a CatalogSource. If any show `NOT FOUND`, the mirror set is incomplete - check the oc-mirror output for errors.
+
+Verify the gateway pod has no WASM errors:
+
+[source,bash]
+----
+oc logs -n openshift-ingress -l istio.io/gateway-name=maas-default-gateway --tail=20 | grep -i wasm
+----
+
+If you see `cannot fetch Wasm module` or `applying deny RBAC filter`, the WASM shim patch from <<wasm-shim>> was not applied or the image is not in the mirror registry.
+
+== GPU setup (optional)
+
+=== GPU MachineSet
+
+If the cluster has no GPU nodes and you plan to deploy GPU models (Gemma, Granite, GPT-oss), create a GPU MachineSet.
+
+A template is provided at `manifests/00-disconnected/gpu-machineset.yaml`. Before applying, discover the cluster-specific values:
+
+[source,bash]
+----
+export INFRA_ID=$(oc get -o jsonpath='{.status.infrastructureName}' infrastructure cluster)
+export AMI=$(oc get machineset -n openshift-machine-api -o jsonpath='{.items[0].spec.template.spec.providerSpec.value.ami.id}')
+export SUBNET=$(oc get machineset -n openshift-machine-api -o jsonpath='{.items[0].spec.template.spec.providerSpec.value.subnet.id}')
+export REGION=$(oc get machineset -n openshift-machine-api -o jsonpath='{.items[0].spec.template.spec.providerSpec.value.placement.region}')
+export AZ=$(oc get machineset -n openshift-machine-api -o jsonpath='{.items[0].spec.template.spec.providerSpec.value.placement.availabilityZone}')
+export INSTANCE_TYPE=g5.2xlarge
+export MS_NAME=${INFRA_ID}-gpu-${AZ}
+export IAM_PROFILE=${INFRA_ID}-worker-profile
+export SG=${INFRA_ID}-node
+
+envsubst < manifests/00-disconnected/gpu-machineset.yaml | oc apply -f -
+----
+
+Wait for the GPU node to be Ready:
+
+[source,bash]
+----
+oc get machines -n openshift-machine-api -w
+# Once Running, check for GPU labels:
+oc get nodes -l nvidia.com/gpu.present=true
+----
+
+The default instance type is `g5.2xlarge` (1x A10G, 24 GB VRAM) - enough for Gemma 2 9B FP8. Edit the template to use `g5.12xlarge` (4x A10G, 96 GB VRAM) for larger models.
+
+=== GPU driver compilation on disconnected
+
+The NVIDIA GPU operator compiles the kernel module at runtime. In a disconnected environment, the driver container cannot reach external repos for the required kernel packages (`kernel-headers`, `kernel-devel`, and `kernel` with vmlinuz). The standard UBI repos do not ship kernel packages.
+
+The solution is to extract the kernel files from the Driver Toolkit (DTK) image - which is part of the OCP release and already mirrored - build local RPMs, and serve them via a local HTTP repo.
+
+==== Find the DTK image
+
+[source,bash]
+----
+DTK_IMAGE=$(oc adm release info --image-for=driver-toolkit)
+echo "DTK: $DTK_IMAGE"
+----
+
+==== Extract kernel packages from DTK
+
+On a host that can pull from the mirror registry:
+
+[source,bash]
+----
+KERNEL_VERSION=$(uname -r)  # or get from: oc debug node/<gpu-node> -- chroot /host uname -r
+
+# Create a container from the DTK and copy kernel files
+podman create --name dtk-extract $DTK_IMAGE
+podman cp dtk-extract:/usr/src/kernels/${KERNEL_VERSION} /tmp/kernel-src/
+podman cp dtk-extract:/usr/include /tmp/kernel-headers/
+podman cp dtk-extract:/lib/modules/${KERNEL_VERSION} /tmp/kernel-modules/
+podman rm dtk-extract
+----
+
+==== Build RPMs and create a local repo
+
+[source,bash]
+----
+# Install rpmbuild and createrepo_c
+yum install -y rpm-build createrepo_c
+
+# Build kernel-devel, kernel-headers and kernel RPMs from the extracted files
+# (use rpmbuild with custom spec files that package the DTK files)
+# See the rhoai-maas-guide repo for example spec files
+
+# Create a yum repo from the RPMs
+mkdir -p /tmp/kernel-repo/rpms
+cp ~/rpmbuild/RPMS/x86_64/kernel*.rpm /tmp/kernel-repo/rpms/
+----
+
+==== Download CUDA development packages
+
+The NVIDIA driver container also needs CUDA development packages (`cuda-devel`, `cuda-nvcc`, `cuda-cudart-devel`) to compile. On a connected cluster the driver pod downloads these from `developer.download.nvidia.com`. On a fully air-gapped cluster that is unreachable, so the CUDA RPMs must be included in the same local repo.
+
+On a connected host with access to the NVIDIA CUDA repo:
+
+[source,bash]
+----
+# Add the NVIDIA CUDA repo (if not already configured)
+dnf config-manager --add-repo \
+  https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/cuda-rhel9.repo
+
+# Download the CUDA packages and their dependencies
+dnf download --resolve --destdir /tmp/cuda-rpms \
+  cuda-devel-12-6 cuda-nvcc-12-6 cuda-cudart-devel-12-6
+
+# Copy them into the same repo directory as the kernel RPMs
+cp /tmp/cuda-rpms/*.rpm /tmp/kernel-repo/rpms/
+----
+
+TIP: The CUDA version must match what the GPU operator expects. Check the driver container image tag or the `CUDA_VERSION` env var in the ClusterPolicy to find the right version.
+
+Generate the repo metadata:
+
+[source,bash]
+----
+createrepo_c /tmp/kernel-repo/rpms/
+----
+
+==== Serve the repo and configure the GPU operator
+
+[source,bash]
+----
+# Serve the repo over HTTP (from a host reachable by the GPU node)
+cd /tmp/kernel-repo/rpms && python3 -m http.server 8088 &
+
+# Create a ConfigMap with the repo config
+oc create configmap kernel-repo-config -n nvidia-gpu-operator \
+  --from-literal=local-kernel.repo="[local-kernel]
+name=Local Kernel and CUDA Packages
+baseurl=http://<bastion-ip>:8088/
+enabled=1
+gpgcheck=0
+priority=1"
+
+# Patch the ClusterPolicy to use the repo
+oc patch clusterpolicy gpu-cluster-policy --type=merge \
+  -p '{"spec":{"driver":{"repoConfig":{"configMapName":"kernel-repo-config"}}}}'
+----
+
+Replace `<bastion-ip>` with the IP of the host serving the repo. The GPU driver pod must be able to reach this host on port 8088.
+
+IMPORTANT: The HTTP repo must stay running for the lifetime of the GPU nodes. The NVIDIA driver pod runs `dnf install` every time it starts - on node reboots, MachineSet scale-ups, operator upgrades, or ClusterPolicy changes. If the repo is gone, driver compilation fails and the GPU stays unusable. For production use, serve the repo from a persistent service (httpd container, nginx pod, or a proper artifact server) instead of a background `python3` process. We opened link:https://redhat.atlassian.net/browse/RHOAIENG-82815[RHOAIENG-82815] to track finding a better long-term solution for this.
+
+==== Verify the driver
+
+[source,bash]
+----
+# Wait for the driver pod to complete compilation
+oc get pods -n nvidia-gpu-operator -l app=nvidia-driver-daemonset -w
+
+# Verify GPU is available
+oc get nodes -l nvidia.com/gpu.present=true \
+  -o jsonpath='{.items[*].status.allocatable.nvidia\.com/gpu}'
+----
+
+== Troubleshooting
+
+=== WASM shim: "RBAC: access denied"
+
+**Symptom:** All MaaS API requests return "RBAC: access denied". The gateway pod logs show:
+
+[source]
+----
+error wasm  error in converting the wasm config to local: cannot fetch Wasm module
+oci://registry.access.redhat.com/rhcl-1/wasm-shim-rhel9@sha256:...
+could not fetch manifest: dial tcp: lookup registry.access.redhat.com: no such host.
+applying deny RBAC filter
+----
+
+**Cause:** The Kuadrant WASM shim is fetched at runtime by the Envoy gateway pod via the OCI protocol. This fetch bypasses CRI-O and does not respect IDMS/ITMS/ICSP. On a disconnected cluster, the public registry is unreachable, the fetch fails, and Kuadrant falls back to a deny-all RBAC filter.
+
+**Fix:** Apply <<wasm-shim,Step 6 of the Mirroring Workflow>> to patch the RHCL subscription with `RELATED_IMAGE_WASMSHIM` pointing to the mirror registry. Then restart the gateway pod.
+
+**TLS variant:** If you see `tls: failed to verify certificate: x509: certificate signed by unknown authority` instead of `no such host`, the WASM shim is reachable but the mirror registry's CA is not trusted by the gateway pod. Ensure the mirror CA is included in:
+
+* The cluster proxy trusted CA bundle: `oc get proxy/cluster -o jsonpath='{.spec.trustedCA.name}'`
+* The `additionalTrustedCA` in `image.config.openshift.io/cluster`
+
+=== Certificates
+
+In a disconnected environment, the mirror registry uses a self-signed CA. The cluster needs to trust this CA for image pulls AND for workloads running inside RHOAI (workbenches, model servers, pipelines).
+
+If RHOAI was deployed using the standard disconnected procedure:
+
+* The mirror CA is already in the cluster's image.config (`additionalTrustedCA`)
+* The DSCInitialization `trustedCABundle` is set to `Managed` with the CA in `customCABundle`
+* The `odh-trusted-ca-bundle` ConfigMap is propagated to all RHOAI-managed namespaces
+
+Verify:
+
+[source,bash]
+----
+# Cluster trusts the mirror CA
+oc get image.config.openshift.io/cluster -o jsonpath='{.spec.additionalTrustedCA.name}'
+
+# DSCI has the CA bundle
+oc get dscinitialization default-dsci -o jsonpath='{.spec.trustedCABundle.managementState}'
+
+# CA bundle propagated to the MaaS namespace
+oc get configmap odh-trusted-ca-bundle -n redhat-ods-applications
+----
+
+If any of these are missing, refer to the https://docs.redhat.com/en/documentation/red_hat_openshift_ai_self-managed/3.4/html/installing_and_uninstalling_openshift_ai_self-managed_in_a_disconnected_environment[RHOAI disconnected installation guide], Chapter 8 (Working with certificates).
+
+=== MaaS Gateway connectivity (AWS)
+
+On AWS, the MaaS gateway creates a LoadBalancer service that defaults to an **external** NLB with public IPs. In a disconnected VPC, these public IPs are unreachable - both from the high-side host and from pods inside the cluster (the RHOAI dashboard's `maas-ui` sidecar fails with EOF errors).
+
+When you run `setup-maas.sh` with `DISCONNECTED=true` on AWS, the script automatically patches the Gateway to use an internal NLB:
+
+[source,bash]
+----
+# What setup-maas.sh does in Phase 2, Step 6:
+oc patch gateway maas-default-gateway -n openshift-ingress --type=merge -p '{
+  "spec": {
+    "infrastructure": {
+      "annotations": {
+        "service.beta.kubernetes.io/aws-load-balancer-internal": "true"
+      }
+    }
+  }
+}'
+# Then deletes the service so the controller recreates it with an internal NLB
+oc delete svc maas-default-gateway-openshift-default -n openshift-ingress
+----
+
+After the internal NLB is provisioned (1-2 minutes), `maas.<cluster-domain>` resolves to private IPs reachable from inside the VPC.
+
+If you already deployed MaaS without `DISCONNECTED=true`, you can apply the patch manually and delete the service. The gateway controller recreates it automatically.
+
+The `setup-maas.sh` and `verify.sh` scripts also have a NodePort fallback - if the MaaS gateway URL is unreachable, they discover the NodePort and test via `--resolve`. You can test manually:
+
+[source,bash]
+----
+# Find the NodePort for HTTPS
+NODEPORT=$(oc get svc maas-default-gateway-openshift-default -n openshift-ingress \
+  -o jsonpath='{.spec.ports[?(@.port==443)].nodePort}')
+
+# Find a node's internal IP
+NODE_IP=$(oc get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
+
+# Test via NodePort
+CLUSTER_DOMAIN=$(oc get ingresses.config/cluster -o jsonpath='{.spec.domain}')
+curl -sk --resolve "maas.${CLUSTER_DOMAIN}:${NODEPORT}:${NODE_IP}" \
+  "https://maas.${CLUSTER_DOMAIN}:${NODEPORT}/maas-api/v1/health"
+----
+
+== Next steps
+
+Once the MaaS operators are available and (optionally) a GPU node is ready, proceed to xref:01-prerequisites.adoc[Phase 1: Prerequisites] and run the guide normally. Use the `DISCONNECTED=true` flag with `setup-maas.sh` to automatically skip Phase 8 (External Models) and use the disconnected simulator variant:
+
+[source,bash]
+----
+DISCONNECTED=true ./scripts/setup-maas.sh
+----

@@ -33,6 +33,19 @@ Red Hat AI Granite 4.0-h-tiny FP8 Dynamic, a small Granite model (~1B parameters
 * *GPU memory*: ~8GB required
 * *Startup time*: 5-15 minutes (image pull + model loading)
 
+=== gemma
+
+Google Gemma 2 9B IT FP8 running on the Red Hat AI Inference Server (vLLM CUDA). A 9B parameter instruction-tuned model with FP8 quantization, suitable for general-purpose text generation and code tasks. Fits on a single A10G GPU (24GB VRAM).
+
+* *Runtime*: vLLM CUDA (registry.redhat.io/rhaiis/vllm-cuda-rhel9:3.3.0)
+* *Model weights*: OCI modelcar `registry.redhat.io/rhelai1/modelcar-gemma-2-9b-it-fp8:1.5`
+* *Resources*: 2-4 CPU, 8Gi-24Gi memory, 1x NVIDIA GPU
+* *GPU memory*: ~12GB required (FP8 quantized)
+* *Startup time*: 5-15 minutes (image pull + model loading)
+* *Context length*: 4096 tokens (configurable via `--max-model-len`)
+
+NOTE: Gemma is a US-origin model, making it suitable for deployments with export control requirements. The OCI modelcar is available from registry.redhat.io and works in both connected and disconnected (air-gapped) environments.
+
 === gpt-oss-20b
 
 OpenAI gpt-oss-20b running on the Red Hat AI Inference Server (vLLM CUDA). Requires a capable GPU node (A10G or better) with sufficient VRAM.
@@ -42,6 +55,15 @@ OpenAI gpt-oss-20b running on the Red Hat AI Inference Server (vLLM CUDA). Requi
 * *Resources*: 2-4 CPU, 16Gi-60Gi memory, 1x NVIDIA GPU
 * *GPU memory*: ~16GB required
 * *Startup time*: 5-15 minutes (image pull + model loading)
+
+=== simulator-disconnected
+
+A variant of the simulator for air-gapped clusters. Uses `oci://` storage URI instead of `hf://` because HuggingFace is unreachable in disconnected environments. Functionally identical to the connected simulator - the inference container generates random responses regardless of the model URI.
+
+* *Runtime*: llm-d-inference-sim (CPU-only)
+* *Resources*: 100m-500m CPU, 256Mi-512Mi memory
+* *GPU*: Not required
+* *Startup time*: ~30 seconds (plus OCI modelcar init pull from mirror)
 
 == Custom Resource Descriptions
 
@@ -118,14 +140,24 @@ This disables the Xet protocol and falls back to standard HTTP downloads. The pa
 GPU models using OCI modelcar images (granite-tiny-gpu, gpt-oss-20b) are *not* affected by this issue since they do not download from HuggingFace.
 ====
 
+For disconnected (air-gapped) clusters, use the disconnected simulator variant:
+
+[source,bash]
+----
+oc apply -k manifests/05-maas-models/simulator-disconnected/
+----
+
 Or deploy a GPU model if your cluster has NVIDIA GPUs:
 
 [source,bash]
 ----
-# For clusters with modest GPU (8GB+ VRAM)
+# Gemma 2 9B IT FP8 (12GB+ VRAM, single A10G)
+oc apply -k manifests/05-maas-models/gemma/
+
+# Granite 4.0-h-tiny FP8 (8GB+ VRAM)
 oc apply -k manifests/05-maas-models/granite-tiny-gpu/
 
-# For clusters with larger GPU (16GB+ VRAM, A10G or better)
+# GPT-oss-20b (16GB+ VRAM, A10G or better)
 oc apply -k manifests/05-maas-models/gpt-oss-20b/
 ----
 

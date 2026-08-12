@@ -1,6 +1,9 @@
 * xref:index.adoc[Overview]
 * xref:quick-start.adoc[Automated Setup]
 
+.Disconnected Setup
+* xref:00-disconnected.adoc[Phase 0: Disconnected Setup]
+
 .Installation Guide
 * xref:01-prerequisites.adoc[Phase 1: Prerequisites]
 * xref:02-platform-config.adoc[Phase 2: Platform Configuration]
@@ -19,6 +22,9 @@
 
 .Reference
 * xref:08-architecture.adoc[Architecture & Request Flow]
+
+.Cleanup
+* xref:09-cleanup.adoc[Cleanup & Teardown]
 
 .Tools
 * xref:claude-code.adoc[AI-Assisted Installation]

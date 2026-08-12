@@ -2,6 +2,8 @@
 
 NOTE: This phase requires a completed MaaS installation (through xref:04-rhoai-config.adoc[Phase 4]) and at least one local model deployed (xref:05-maas-models.adoc[Phase 5]) to validate the gateway is functional.
 
+WARNING: This phase is NOT compatible with disconnected/air-gapped environments. External models require internet access to reach third-party APIs (OpenAI, Bedrock, Gemini). If you are running in disconnected mode, skip this phase entirely.
+
 The `ExternalModel` CRD lets you expose third-party LLM APIs (OpenAI, AWS Bedrock, Google Gemini, Azure OpenAI, etc.) through the MaaS gateway. External models get the same API key management, authentication, rate limiting, and usage tracking as locally-served models - your consumers use a single gateway endpoint regardless of where the model runs.
 
 TIP: All file paths and `oc apply` commands in this guide are relative to the link:{repo-url}[rhoai-maas-guide] repository root. Make sure you have cloned it and are working from its root directory (see xref:index.adoc#_getting_started[Getting Started]).
@@ -123,8 +125,6 @@ curl -sk "${MAAS_GW}/external-models/gpt-4o-mini/v1/chat/completions" \
 ----
 
 A successful response contains a `choices` array with the model's reply.
-
-WARNING: There is a known platform bug where the BBR ext-proc filter is never inserted into the Envoy filter chain due to an EnvoyFilter match mismatch. If inference returns 404, see the <<known-issues>> section below. This is tracked in link:https://redhat.atlassian.net/browse/RHOAIENG-68594[RHOAIENG-68594].
 
 == Automated Setup
 
@@ -279,20 +279,6 @@ curl -sk "${MAAS_GW}/external-models/aws-gpt-oss-20b/v1/chat/completions" \
 [[known-issues]]
 == Known Issues
 
-=== ext-proc filter not inserted (RHOAIENG-68594)
-
-The `payload-processing` EnvoyFilter matches on a WasmPlugin-style filter name (`extensions.istio.io/wasmplugin/...`), but Kuadrant creates the Wasm filter with the generic name `envoy.filters.http.wasm`. The match fails, so the BBR ext-proc is never added to the Envoy filter chain. Without ext-proc, there is no path rewriting and no credential injection - inference returns 404 or 401 from the upstream provider.
-
-This affects all external model providers. A temporary workaround (reverted by the MaaS controller within seconds):
-
-[source,bash]
-----
-oc patch envoyfilter payload-processing -n openshift-ingress --type='json' \
-  -p='[{"op": "replace", "path": "/spec/configPatches/0/match/listener/filterChain/filter/subFilter/name", "value": "envoy.filters.http.wasm"}]'
-----
-
-Tracked in link:https://redhat.atlassian.net/browse/RHOAIENG-68594[RHOAIENG-68594].
-
 === Gemini path incompatibility (RHOAIENG-68592)
 
 The BBR `openai` provider hardcodes the upstream path to `/v1/chat/completions`, but Gemini requires `/v1beta/openai/chat/completions`. See the <<google-gemini,Google Gemini>> section above for details. Tracked in link:https://redhat.atlassian.net/browse/RHOAIENG-68592[RHOAIENG-68592].
@@ -352,7 +338,6 @@ The `provider` field in the ExternalModel spec maps to a BBR payload translator.
 
 * link:https://docs.redhat.com/en/documentation/red_hat_openshift_ai_self-managed/3.4/html/govern_llm_access_with_models-as-a-service/index#maas-external-model_maas-deploy[RHOAI ExternalModel documentation]
 * link:https://github.com/opendatahub-io/ai-gateway-payload-processing[BBR (ai-gateway-payload-processing) repository]
-* link:https://redhat.atlassian.net/browse/RHOAIENG-68594[RHOAIENG-68594 - ext-proc EnvoyFilter match mismatch (all providers)]
 * link:https://redhat.atlassian.net/browse/RHOAIENG-68592[RHOAIENG-68592 - Gemini BBR path incompatibility]
 
 == Next step

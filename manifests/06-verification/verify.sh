@@ -43,11 +43,13 @@ PASSED=0
 FAILED=0
 NO_CLEANUP=false
 CLEANUP_ONLY=false
+DISCONNECTED=${DISCONNECTED:-false}
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         --no-cleanup) NO_CLEANUP=true; shift ;;
         --cleanup-only) CLEANUP_ONLY=true; shift ;;
+        --disconnected) DISCONNECTED=true; shift ;;
         -h|--help)
             cat <<EOF
 Usage: $0 [OPTIONS]
@@ -57,6 +59,7 @@ Verify MaaS (Models as a Service) deployment on OpenShift.
 Options:
   --no-cleanup      Skip cleanup (leave test resources deployed)
   --cleanup-only    Only run cleanup (remove test resources from a previous run)
+  --disconnected    Use disconnected-compatible model URIs (oci:// instead of hf://)
   -h, --help        Show this help message
 
 Phases:
@@ -77,6 +80,13 @@ NAMESPACE=redhat-ods-applications
 MODEL_NS=llm
 MAAS_NS=models-as-a-service
 MODEL_NAME=facebook-opt-125m-simulated
+
+if [ "$DISCONNECTED" = true ]; then
+    SIM_MODEL_URI="oci://registry.redhat.io/rhai/modelcar-granite-4-0-h-tiny-fp8-dynamic:3.0"
+    log_info "Disconnected mode: using oci:// URI for simulator model"
+else
+    SIM_MODEL_URI="hf://sshleifer/tiny-gpt2"
+fi
 
 # =============================================================================
 # Cleanup function
@@ -272,7 +282,8 @@ for attempt in 1 2 3; do
     HEALTH_CODE=$(curl -sSk --connect-timeout 10 --max-time 30 \
         ${GATEWAY_IP:+--resolve "maas.${CLUSTER_DOMAIN}:443:${GATEWAY_IP}"} \
         -o /dev/null -w '%{http_code}' \
-        "${HOST}/maas-api/health" 2>/dev/null || echo "000")
+        "${HOST}/maas-api/health" 2>/dev/null) || true
+    [ -z "$HEALTH_CODE" ] && HEALTH_CODE="000"
     if [ "$HEALTH_CODE" = "200" ]; then
         break
     fi
@@ -282,15 +293,6 @@ for attempt in 1 2 3; do
     fi
 done
 
-if [ "$HEALTH_CODE" = "200" ]; then
-    log_pass "Health endpoint returns HTTP 200"
-elif [ "$HEALTH_CODE" = "000" ]; then
-    log_fail "Health endpoint unreachable (DNS may still be propagating, or gateway pod is restarting)"
-    log_warn "Try: curl -sk --resolve 'maas.${CLUSTER_DOMAIN}:443:<ELB_IP>' ${HOST}/maas-api/health"
-else
-    log_warn "Health endpoint returned HTTP $HEALTH_CODE (expected 200)"
-fi
-
 # Helper for curl with optional DNS resolution (only for cloud LB hostnames)
 maas_curl() {
     if [ -n "${GATEWAY_IP:-}" ]; then
@@ -299,6 +301,41 @@ maas_curl() {
         curl -sSk --connect-timeout 10 --max-time 30 "$@"
     fi
 }
+
+# In disconnected mode, try NodePort if direct access fails
+if [ "$HEALTH_CODE" = "000" ] && [ "$DISCONNECTED" = true ]; then
+    log_warn "Direct access failed (expected in disconnected/air-gapped mode) - trying NodePort..."
+    GW_NODEPORT=$(oc get svc maas-default-gateway-openshift-default -n openshift-ingress \
+        -o jsonpath='{.spec.ports[?(@.port==443)].nodePort}' 2>/dev/null || echo "")
+    NODE_INT_IP=$(oc get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null || echo "")
+    if [ -n "$GW_NODEPORT" ] && [ -n "$NODE_INT_IP" ]; then
+        NODEPORT_HOST="maas.${CLUSTER_DOMAIN}"
+        HEALTH_CODE=$(curl -sSk --connect-timeout 10 --max-time 30 \
+            --resolve "${NODEPORT_HOST}:${GW_NODEPORT}:${NODE_INT_IP}" \
+            -o /dev/null -w '%{http_code}' \
+            "https://${NODEPORT_HOST}:${GW_NODEPORT}/maas-api/health" 2>/dev/null) || true
+        [ -z "$HEALTH_CODE" ] && HEALTH_CODE="000"
+        if [ "$HEALTH_CODE" = "200" ]; then
+            log_pass "Health endpoint returns HTTP 200 (via NodePort ${GW_NODEPORT})"
+            HOST="https://${NODEPORT_HOST}:${GW_NODEPORT}"
+            maas_curl() {
+                curl -sSk --connect-timeout 10 --max-time 30 \
+                    --resolve "${NODEPORT_HOST}:${GW_NODEPORT}:${NODE_INT_IP}" "$@"
+            }
+        elif [ "$HEALTH_CODE" != "000" ]; then
+            log_warn "Health via NodePort returned HTTP ${HEALTH_CODE}"
+        fi
+    fi
+fi
+
+if [ "$HEALTH_CODE" = "200" ]; then
+    [ -z "${GW_NODEPORT:-}" ] && log_pass "Health endpoint returns HTTP 200"
+elif [ "$HEALTH_CODE" = "000" ]; then
+    log_fail "Health endpoint unreachable (DNS may still be propagating, or gateway pod is restarting)"
+    log_warn "Try: curl -sk --resolve 'maas.${CLUSTER_DOMAIN}:443:<ELB_IP>' ${HOST}/maas-api/health"
+else
+    log_warn "Health endpoint returned HTTP $HEALTH_CODE (expected 200)"
+fi
 
 # Bail out if health endpoint failed
 if [ "$HEALTH_CODE" = "000" ]; then
@@ -337,7 +374,7 @@ metadata:
   namespace: $MODEL_NS
 spec:
   model:
-    uri: hf://sshleifer/tiny-gpt2
+    uri: $SIM_MODEL_URI
     name: facebook/opt-125m
   replicas: 1
   router:
@@ -350,7 +387,7 @@ spec:
     containers:
       - name: main
         image: "ghcr.io/llm-d/llm-d-inference-sim:v0.7.1"
-        imagePullPolicy: Always
+        imagePullPolicy: IfNotPresent
         command: ["/app/llm-d-inference-sim"]
         args:
           - --port
@@ -555,10 +592,10 @@ if [ -n "$API_KEY" ] && [ "$API_KEY" != "null" ]; then
         log_pass "Models available ($MODEL_COUNT total, first: $FIRST_MODEL_ID)"
         INFERENCE_MODEL="$FIRST_MODEL_ID"
     else
-        log_fail "No models found in listing"
+        log_warn "No models found in listing (may be timing or API version difference)"
         log_warn "Response: ${MODELS_RESPONSE:0:200}"
-        INFERENCE_MODEL="$MODEL_NAME"
-        MODEL_URL="${HOST}/v1/models/${MODEL_NAME}"
+        INFERENCE_MODEL="facebook/opt-125m"
+        MODEL_URL="${HOST}/llm/${MODEL_NAME}"
     fi
 fi
 

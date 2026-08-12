@@ -32,7 +32,7 @@ spec:
         operator: Exists
     containers:
       - name: main
-        image: registry.redhat.io/rhaiis/vllm-cuda-rhel9:3.3.0
+        image: registry.redhat.io/rhaii/vllm-cuda-rhel9@sha256:5800e12b2a465f15961fcf34b645d79ed4f91ec9161eab22b1205d12682183c8
         command:
           - python
           - -m

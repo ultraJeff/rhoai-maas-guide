@@ -1,13 +1,14 @@
-# OpenAI gpt-oss-20b on vLLM CUDA
-# Model weights: OCI modelcar from registry.redhat.io (~8GB download)
+# Google Gemma 2 9B IT FP8 on vLLM CUDA
+# A 9B parameter instruction-tuned model, FP8 quantized
+# Model weights: OCI modelcar from registry.redhat.io
 # Runtime: Red Hat AI Inference Server (vLLM CUDA)
-# Requires: nvidia.com/gpu node (A10G or better), ~16GB GPU memory
+# Requires: nvidia.com/gpu node, ~12GB GPU memory (fits single A10G 24GB)
 apiVersion: serving.kserve.io/v1alpha1
 kind: LLMInferenceService
 metadata:
-  name: gpt-oss-20b
+  name: gemma-2-9b-it
   annotations:
-    openshift.io/display-name: "OpenAI gpt-oss-20b"
+    openshift.io/display-name: "Google Gemma 2 9B IT FP8"
     opendatahub.io/model-type: generative
     security.opendatahub.io/enable-auth: "true"
   labels:
@@ -15,8 +16,8 @@ metadata:
     opendatahub.io/genai-asset: "true"
 spec:
   model:
-    name: gpt-oss-20b
-    uri: oci://registry.redhat.io/rhelai1/modelcar-gpt-oss-20b:1.5
+    name: gemma-2-9b-it
+    uri: oci://registry.redhat.io/rhelai1/modelcar-gemma-2-9b-it-fp8:1.5
   replicas: 1
   router:
     route: {}
@@ -43,6 +44,7 @@ spec:
           - --ssl-certfile=/var/run/kserve/tls/tls.crt
           - --ssl-keyfile=/var/run/kserve/tls/tls.key
           - --enable-force-include-usage
+          - --max-model-len=4096
         ports:
           - containerPort: 8000
             name: http
@@ -68,11 +70,11 @@ spec:
         resources:
           requests:
             cpu: "2"
-            memory: 16Gi
+            memory: 8Gi
             nvidia.com/gpu: "1"
           limits:
             cpu: "4"
-            memory: 60Gi
+            memory: 24Gi
             nvidia.com/gpu: "1"
         volumeMounts:
           - mountPath: /dev/shm

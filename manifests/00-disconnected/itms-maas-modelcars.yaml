@@ -1,0 +1,35 @@
+# ImageTagMirrorSet for MaaS modelcar and runtime images.
+#
+# oc-mirror creates IDMS entries for digest-referenced images but NOT ITMS
+# for tag-referenced images. OCI modelcar URIs use tags (e.g. :1.5, :3.0)
+# so CRI-O needs an ITMS to redirect tag-based pulls to the mirror registry.
+#
+# Before applying, replace MIRROR_REGISTRY with your mirror registry address
+# and NAMESPACE with the oc-mirror target namespace (e.g. "maas"):
+#
+#   sed 's|MIRROR_REGISTRY:PORT/NAMESPACE|<your-registry>:<port>/<ns>|g' \
+#     manifests/00-disconnected/itms-maas-modelcars.yaml | oc apply -f -
+#
+# WARNING: Applying ITMS triggers a MachineConfig rollout - nodes will reboot.
+apiVersion: config.openshift.io/v1
+kind: ImageTagMirrorSet
+metadata:
+  name: itms-maas-modelcars
+spec:
+  imageTagMirrors:
+    # Modelcar images (rhai = single 'i')
+    - mirrors:
+        - MIRROR_REGISTRY:PORT/NAMESPACE/rhai
+      source: registry.redhat.io/rhai
+    # Modelcar images (rhelai1)
+    - mirrors:
+        - MIRROR_REGISTRY:PORT/NAMESPACE/rhelai1
+      source: registry.redhat.io/rhelai1
+    # RHCL WASM shim (registry.access.redhat.com, not registry.redhat.io)
+    - mirrors:
+        - MIRROR_REGISTRY:PORT/NAMESPACE/rhcl-1
+      source: registry.access.redhat.com/rhcl-1
+    # Simulator runtime from GitHub Container Registry
+    - mirrors:
+        - MIRROR_REGISTRY:PORT/NAMESPACE/llm-d
+      source: ghcr.io/llm-d

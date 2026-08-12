@@ -59,6 +59,7 @@ WITH_OBSERVABILITY=false
 WITH_EXTERNAL_MODELS=false
 EXTERNAL_MODEL_PROVIDER="${EXTERNAL_MODEL_PROVIDER:-openai}"
 EXTERNAL_MODEL_API_KEY="${EXTERNAL_MODEL_API_KEY:-}"
+DISCONNECTED=${DISCONNECTED:-false}
 DRY_RUN=false
 
 while [[ $# -gt 0 ]]; do
@@ -71,6 +72,7 @@ while [[ $# -gt 0 ]]; do
         --with-external-models) WITH_EXTERNAL_MODELS=true; shift ;;
         --external-model-provider) EXTERNAL_MODEL_PROVIDER="$2"; shift 2 ;;
         --external-model-api-key) EXTERNAL_MODEL_API_KEY="$2"; shift 2 ;;
+        --disconnected) DISCONNECTED=true; shift ;;
         --dry-run) DRY_RUN=true; shift ;;
         -h|--help)
             cat <<'EOF'
@@ -81,10 +83,11 @@ installation through model deployment and verification. Each phase is
 idempotent  - re-running skips what's already done.
 
 Options:
-  --model <name>       Model: simulator, granite-tiny-gpu, gpt-oss-20b, auto (default: auto)
+  --model <name>       Model: simulator, granite-tiny-gpu, gpt-oss-20b, gemma, auto (default: auto)
   --from-phase <N>     Start from phase N (0-8, default: 0)
   --skip-models        Skip Phase 5 (model deployment)
   --skip-verify        Skip Phase 6 (verification)
+  --disconnected       Disconnected/air-gapped mode (oci:// URIs, skip Phase 8)
   --with-observability Also run Phase 7 (Tempo + OpenTelemetry + COO + Gateway telemetry)
   --with-external-models Also run Phase 8 (ExternalModel deployment + test)
   --external-model-provider <p>   Provider: openai (default), gemini, bedrock (or set EXTERNAL_MODEL_PROVIDER)
@@ -101,12 +104,13 @@ Phases:
   5  Deploy model       Auto-detect GPU, apply model Kustomize manifests
   6  Verify             6-phase E2E verification (API, auth, rate limits)
   7  Observability      Tempo + OpenTelemetry + COO + Gateway telemetry (only with --with-observability)
-  8  External models    ExternalModel + governance (only with --with-external-models)
+  8  External models    ExternalModel + governance (only with --with-external-models, skipped in --disconnected)
 
 Auto-detection (--model auto):
   No GPU             -> simulator (CPU-only, ~30s startup)
   GPU VRAM >= 40 GiB -> gpt-oss-20b (L40S, A100, H100)
-  GPU VRAM <  40 GiB -> granite-tiny-gpu (T4, L4, A10)
+  GPU VRAM >= 16 GiB -> gemma (A10G, L4)
+  GPU VRAM <  16 GiB -> granite-tiny-gpu (T4)
 EOF
             exit 0
             ;;
@@ -227,6 +231,14 @@ log_info "  Tenant CR:          $([ "$HAS_TENANT" = true ] && echo "ready" || ec
 log_info "  MetalLB operator:   $([ "$HAS_METALLB" = true ] && echo "installed" || echo "not found")"
 log_info "  Models deployed:    $([ "$HAS_MODELS" = true ] && echo "yes" || echo "no")"
 
+if [ "$DISCONNECTED" = true ]; then
+    log_info "  Mode:               DISCONNECTED (air-gapped)"
+    if [ "$WITH_EXTERNAL_MODELS" = true ]; then
+        log_warn "External models require internet - disabling Phase 8 in disconnected mode"
+        WITH_EXTERNAL_MODELS=false
+    fi
+fi
+
 # Determine which phases will run
 PHASES_TO_RUN=""
 should_run 1 && PHASES_TO_RUN="$PHASES_TO_RUN 1"
@@ -237,6 +249,7 @@ should_run 5 && [ "$SKIP_MODELS" = false ] && PHASES_TO_RUN="$PHASES_TO_RUN 5"
 should_run 6 && [ "$SKIP_VERIFY" = false ] && PHASES_TO_RUN="$PHASES_TO_RUN 6"
 should_run 7 && [ "$WITH_OBSERVABILITY" = true ] && PHASES_TO_RUN="$PHASES_TO_RUN 7"
 should_run 8 && [ "$WITH_EXTERNAL_MODELS" = true ] && PHASES_TO_RUN="$PHASES_TO_RUN 8"
+
 echo ""
 log_info "Phases to run:${PHASES_TO_RUN:- (none)}"
 
@@ -257,6 +270,7 @@ if should_run 1; then
         if [ "$DRY_RUN" = false ]; then
             for ns_label in \
                 "redhat-ods-operator operators.coreos.com/rhods-operator.redhat-ods-operator" \
+                "openshift-operators operators.coreos.com/rhcl-operator.openshift-operators" \
                 "cert-manager-operator operators.coreos.com/openshift-cert-manager-operator.cert-manager-operator" \
                 "openshift-lws-operator operators.coreos.com/leader-worker-set.openshift-lws-operator"
             do
@@ -265,46 +279,60 @@ if should_run 1; then
                 log_info "  Waiting for CSV in $ns..."
                 oc wait csv -n "$ns" -l "$label=" \
                     --for=jsonpath='{.status.phase}'=Succeeded --timeout=900s 2>/dev/null || \
-                    { log_error "  CSV in $ns did not reach Succeeded within 900s — aborting (re-run with --from-phase 1 after manual check)"; exit 1; }
+                    { log_error "  CSV in $ns did not reach Succeeded within 900s - aborting (re-run with --from-phase 1 after manual check)"; exit 1; }
             done
-
-            log_info "  Waiting for RHCL CSV in openshift-operators (Manual approval)..."
-            RHCL_APPROVED=false
-            RHCL_TIMEOUT=900
-            RHCL_ELAPSED=0
-            while [ $RHCL_ELAPSED -lt $RHCL_TIMEOUT ]; do
-                if [ "$RHCL_APPROVED" = false ]; then
-                    PLAN_NAME=$(oc get subscription rhcl-operator -n openshift-operators \
-                        -o jsonpath='{.status.installPlanRef.name}' 2>/dev/null || true)
-                    if [ -n "$PLAN_NAME" ]; then
-                        APPROVED=$(oc get installplan "$PLAN_NAME" -n openshift-operators \
-                            -o jsonpath='{.spec.approved}' 2>/dev/null || echo "true")
-                        if [ "$APPROVED" != "true" ]; then
-                            oc patch installplan "$PLAN_NAME" -n openshift-operators \
-                                --type=merge -p '{"spec":{"approved":true}}' 2>/dev/null || true
-                            log_info "  Install plan $PLAN_NAME approved"
-                        fi
-                        RHCL_APPROVED=true
-                    fi
-                fi
-                RHCL_PHASE=$(oc get csv -n openshift-operators -l 'operators.coreos.com/rhcl-operator.openshift-operators=' \
-                    --no-headers -o jsonpath='{.items[0].status.phase}' 2>/dev/null || echo "")
-                if [ "$RHCL_PHASE" = "Succeeded" ]; then
-                    log_info "  RHCL CSV: Succeeded"
-                    break
-                fi
-                sleep 5
-                RHCL_ELAPSED=$((RHCL_ELAPSED + 5))
-                [ $((RHCL_ELAPSED % 60)) -eq 0 ] && log_info "    Still waiting for RHCL... (${RHCL_ELAPSED}s)"
-            done
-            if [ "$RHCL_PHASE" != "Succeeded" ]; then
-                log_error "  CSV in openshift-operators did not reach Succeeded within ${RHCL_TIMEOUT}s — aborting (re-run with --from-phase 1 after manual check)"
-                exit 1
-            fi
         else
-            log_info "[DRY RUN] Would approve RHCL install plan"
+            log_info "[DRY RUN] Would wait for operator CSVs"
         fi
         log_info "All operator CSVs ready"
+
+        if [ "$DISCONNECTED" = true ] && [ "$DRY_RUN" = false ]; then
+            log_step "Patching RHCL subscription with RELATED_IMAGE_WASMSHIM for disconnected..."
+            WASM_IMAGE=$(oc get csv -n openshift-operators \
+                -l operators.coreos.com/rhcl-operator.openshift-operators \
+                -o jsonpath='{range .items[0].spec.install.spec.deployments[0].spec.template.spec.containers[0].env[*]}{.name}={.value}{"\n"}{end}' 2>/dev/null \
+                | grep RELATED_IMAGE_WASMSHIM | cut -d= -f2)
+            if [ -n "$WASM_IMAGE" ]; then
+                WASM_DIGEST=$(echo "$WASM_IMAGE" | grep -o 'sha256:.*')
+                RHCL_MIRROR=$(oc get imageDigestMirrorSet -o json 2>/dev/null | \
+                    python3 -c "
+import json,sys
+data=json.load(sys.stdin)
+for item in data.get('items',[]):
+    for m in item.get('spec',{}).get('imageDigestMirrors',[]):
+        if 'rhcl-1' in m.get('source',''):
+            print(m['mirrors'][0]); sys.exit(0)
+" 2>/dev/null)
+                if [ -n "$RHCL_MIRROR" ] && [ -n "$WASM_DIGEST" ]; then
+                    WASM_MIRROR="${RHCL_MIRROR}/wasm-shim-rhel9@${WASM_DIGEST}"
+                    CURRENT_WASM=$(oc get subscription rhcl-operator -n openshift-operators \
+                        -o jsonpath='{.spec.config.env[?(@.name=="RELATED_IMAGE_WASMSHIM")].value}' 2>/dev/null)
+                    if [ "$CURRENT_WASM" != "$WASM_MIRROR" ]; then
+                        oc patch subscription rhcl-operator -n openshift-operators --type=merge -p "{
+                          \"spec\": {
+                            \"config\": {
+                              \"env\": [{
+                                \"name\": \"RELATED_IMAGE_WASMSHIM\",
+                                \"value\": \"${WASM_MIRROR}\"
+                              }]
+                            }
+                          }
+                        }"
+                        log_info "  WASM shim redirected to: $WASM_MIRROR"
+                        log_info "  Waiting for RHCL operator pod to restart..."
+                        sleep 5
+                        oc wait pod -n openshift-operators -l app.kubernetes.io/name=kuadrant-operator \
+                            --for=condition=Ready --timeout=120s 2>/dev/null || true
+                    else
+                        log_info "  WASM shim already patched, skipping"
+                    fi
+                else
+                    log_warn "  Could not discover mirror registry from IDMS - patch RELATED_IMAGE_WASMSHIM manually (see Phase 0 docs)"
+                fi
+            else
+                log_warn "  Could not find RELATED_IMAGE_WASMSHIM in RHCL CSV - WASM shim may fail on disconnected"
+            fi
+        fi
     fi
 fi
 
@@ -510,6 +538,42 @@ if should_run 2; then
         log_info "Gateway authorino-tls-bootstrap annotation applied"
     fi
 
+    # Step 6: On disconnected AWS, patch Gateway for internal LB
+    if [ "$DISCONNECTED" = true ] && [ "$PLATFORM_TYPE" = "AWS" ]; then
+        CURRENT_LB=$(oc get svc maas-default-gateway-openshift-default -n openshift-ingress \
+            -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+        if [[ "$CURRENT_LB" != internal-* ]] && [ -n "$CURRENT_LB" ]; then
+            log_step "Patching Gateway for internal LB (disconnected AWS)..."
+            run_cmd oc patch gateway maas-default-gateway -n openshift-ingress --type=merge -p '{
+              "spec": {
+                "infrastructure": {
+                  "annotations": {
+                    "service.beta.kubernetes.io/aws-load-balancer-internal": "true"
+                  }
+                }
+              }
+            }'
+            log_info "Deleting gateway service to force internal NLB recreation..."
+            oc delete svc maas-default-gateway-openshift-default -n openshift-ingress 2>/dev/null || true
+            SVC_WAIT=0
+            while [ $SVC_WAIT -lt 60 ]; do
+                NEW_LB=$(oc get svc maas-default-gateway-openshift-default -n openshift-ingress \
+                    -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+                if [[ "$NEW_LB" == internal-* ]]; then
+                    log_info "Internal NLB ready: $NEW_LB"
+                    break
+                fi
+                sleep 5
+                SVC_WAIT=$((SVC_WAIT + 5))
+            done
+            if [[ "$NEW_LB" != internal-* ]]; then
+                log_warn "Internal NLB not ready after 60s - DNS may take longer to propagate"
+            fi
+        else
+            log_info "Gateway LB already internal, skipping"
+        fi
+    fi
+
     # Label redhat-ods-applications for Gateway route binding (best practice: least privilege)
     oc label namespace redhat-ods-applications maas.opendatahub.io/gateway-access=true --overwrite 2>/dev/null || true
 fi
@@ -665,14 +729,31 @@ if should_run 4; then
         fi
     fi
 
-    # Health check
+    # Health check (in disconnected mode, external ELB may be unreachable - try NodePort fallback)
     if [ "$DRY_RUN" = false ]; then
-        HTTP_CODE=$(curl -sk -o /dev/null -w '%{http_code}' \
-            "https://maas.${CLUSTER_DOMAIN}/maas-api/health" 2>/dev/null || echo "000")
+        HTTP_CODE=$(curl -sk --connect-timeout 10 --max-time 15 -o /dev/null -w '%{http_code}' \
+            "https://maas.${CLUSTER_DOMAIN}/maas-api/health" 2>/dev/null) || true
+        [ -z "$HTTP_CODE" ] && HTTP_CODE="000"
         if [ "$HTTP_CODE" = "200" ]; then
             log_info "Health endpoint: HTTP 200"
         elif [ "$HTTP_CODE" = "401" ]; then
             log_info "Health endpoint: HTTP 401 (auth working, health may need token)"
+        elif [ "$HTTP_CODE" = "000" ] && [ "$DISCONNECTED" = true ]; then
+            log_warn "Health endpoint unreachable via external URL (expected in disconnected mode)"
+            GW_NODEPORT=$(oc get svc maas-default-gateway-openshift-default -n openshift-ingress \
+                -o jsonpath='{.spec.ports[?(@.port==443)].nodePort}' 2>/dev/null || echo "")
+            NODE_INT_IP=$(oc get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null || echo "")
+            if [ -n "$GW_NODEPORT" ] && [ -n "$NODE_INT_IP" ]; then
+                NP_CODE=$(curl -sk --connect-timeout 10 --max-time 15 -o /dev/null -w '%{http_code}' \
+                    --resolve "maas.${CLUSTER_DOMAIN}:${GW_NODEPORT}:${NODE_INT_IP}" \
+                    "https://maas.${CLUSTER_DOMAIN}:${GW_NODEPORT}/maas-api/health" 2>/dev/null) || true
+                [ -z "$NP_CODE" ] && NP_CODE="000"
+                if [ "$NP_CODE" = "200" ] || [ "$NP_CODE" = "401" ]; then
+                    log_info "Health endpoint: HTTP ${NP_CODE} (via NodePort ${GW_NODEPORT})"
+                else
+                    log_warn "Health endpoint via NodePort: HTTP ${NP_CODE}"
+                fi
+            fi
         else
             log_warn "Health endpoint: HTTP ${HTTP_CODE} (may need DNS propagation)"
         fi
@@ -696,18 +777,26 @@ if should_run 5 && [ "$SKIP_MODELS" = false ]; then
             GPU_MEMORY=$(oc get nodes -o jsonpath='{.items[*].metadata.labels.nvidia\.com/gpu\.memory}' 2>/dev/null \
                 | tr ' ' '\n' | sort -rn | head -1)
             if [ -z "$GPU_MEMORY" ]; then
-                MODEL="simulator"
-                log_info "No GPU nodes detected -> simulator"
+                if [ "$DISCONNECTED" = true ]; then
+                    MODEL="simulator-disconnected"
+                    log_info "No GPU nodes detected (disconnected) -> simulator-disconnected"
+                else
+                    MODEL="simulator"
+                    log_info "No GPU nodes detected -> simulator"
+                fi
             elif [ "$GPU_MEMORY" -ge 40960 ] 2>/dev/null; then
                 MODEL="gpt-oss-20b"
                 log_info "GPU VRAM: ${GPU_MEMORY} MiB (>= 40960) -> gpt-oss-20b"
+            elif [ "$GPU_MEMORY" -ge 16384 ] 2>/dev/null; then
+                MODEL="gemma"
+                log_info "GPU VRAM: ${GPU_MEMORY} MiB (>= 16384) -> gemma"
             else
                 MODEL="granite-tiny-gpu"
-                log_info "GPU VRAM: ${GPU_MEMORY} MiB (< 40960) -> granite-tiny-gpu"
+                log_info "GPU VRAM: ${GPU_MEMORY} MiB (< 16384) -> granite-tiny-gpu"
             fi
         fi
 
-        VALID_MODELS="simulator granite-tiny-gpu gpt-oss-20b"
+        VALID_MODELS="simulator simulator-disconnected granite-tiny-gpu gpt-oss-20b gemma"
         if ! echo "$VALID_MODELS" | grep -qw "$MODEL"; then
             log_error "Unknown model: $MODEL (valid: $VALID_MODELS)"
             exit 1
@@ -795,7 +884,11 @@ if should_run 6 && [ "$SKIP_VERIFY" = false ]; then
         log_info "[DRY RUN] Would run: $VERIFY_SCRIPT"
     else
         log_info "Running E2E verification..."
-        "$VERIFY_SCRIPT" || log_warn "Verification had failures  - check output above"
+        if [ "$DISCONNECTED" = true ]; then
+            "$VERIFY_SCRIPT" --disconnected || log_warn "Verification had failures  - check output above"
+        else
+            "$VERIFY_SCRIPT" || log_warn "Verification had failures  - check output above"
+        fi
     fi
 fi
 
@@ -850,30 +943,6 @@ if should_run 7 && [ "$WITH_OBSERVABILITY" = true ]; then
     # COO
     log_step "Installing Cluster Observability Operator..."
     run_cmd oc apply -k "$MANIFESTS_DIR/07-observability/coo/"
-
-    log_info "Approving COO install plan (pinned to v1.4.0, Manual approval)..."
-    if [ "$DRY_RUN" = false ]; then
-        for attempt in $(seq 1 60); do
-            PLAN_NAME=$(oc get subscription cluster-observability-operator \
-                -n openshift-cluster-observability-operator \
-                -o jsonpath='{.status.installPlanRef.name}' 2>/dev/null || true)
-            if [ -n "$PLAN_NAME" ]; then
-                APPROVED=$(oc get installplan "$PLAN_NAME" \
-                    -n openshift-cluster-observability-operator \
-                    -o jsonpath='{.spec.approved}' 2>/dev/null || echo "true")
-                if [ "$APPROVED" != "true" ]; then
-                    oc patch installplan "$PLAN_NAME" \
-                        -n openshift-cluster-observability-operator \
-                        --type=merge -p '{"spec":{"approved":true}}' 2>/dev/null || true
-                    log_info "  COO install plan $PLAN_NAME approved"
-                fi
-                break
-            fi
-            sleep 2
-        done
-    else
-        log_info "[DRY RUN] Would approve COO install plan"
-    fi
 
     if [ "$DRY_RUN" = false ]; then
         log_info "Waiting for COO CSV..."
@@ -935,7 +1004,9 @@ fi
 if should_run 8 && [ "$WITH_EXTERNAL_MODELS" = true ]; then
     log_phase 8 "External Models (provider: ${EXTERNAL_MODEL_PROVIDER})"
 
-    if [ -z "$EXTERNAL_MODEL_API_KEY" ]; then
+    if [ "$DISCONNECTED" = true ]; then
+        log_warn "Phase 8 skipped - external models require internet access (incompatible with disconnected/air-gapped)"
+    elif [ -z "$EXTERNAL_MODEL_API_KEY" ]; then
         log_warn "No external model API key provided (use --external-model-api-key or EXTERNAL_MODEL_API_KEY env var)"
         log_warn "Skipping Phase 8"
     else
@@ -1099,7 +1170,20 @@ else
         -o jsonpath='{.status.conditions[?(@.type=="Programmed")].status}' 2>/dev/null || echo "Unknown")
     API_READY=$(oc get deployment maas-api -n "$NAMESPACE" \
         -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
-    HEALTH=$(curl -sk -o /dev/null -w '%{http_code}' "${MAAS_URL}/maas-api/health" 2>/dev/null || echo "000")
+    HEALTH=$(curl -sk --connect-timeout 10 --max-time 15 -o /dev/null -w '%{http_code}' "${MAAS_URL}/maas-api/health" 2>/dev/null) || true
+    [ -z "$HEALTH" ] && HEALTH="000"
+    if [ "$HEALTH" = "000" ] && [ "$DISCONNECTED" = true ]; then
+        GW_NODEPORT=$(oc get svc maas-default-gateway-openshift-default -n openshift-ingress \
+            -o jsonpath='{.spec.ports[?(@.port==443)].nodePort}' 2>/dev/null || echo "")
+        NODE_INT_IP=$(oc get nodes -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}' 2>/dev/null || echo "")
+        if [ -n "$GW_NODEPORT" ] && [ -n "$NODE_INT_IP" ]; then
+            HEALTH=$(curl -sk --connect-timeout 10 --max-time 15 -o /dev/null -w '%{http_code}' \
+                --resolve "maas.${CLUSTER_DOMAIN}:${GW_NODEPORT}:${NODE_INT_IP}" \
+                "https://maas.${CLUSTER_DOMAIN}:${GW_NODEPORT}/maas-api/health" 2>/dev/null) || true
+            [ -z "$HEALTH" ] && HEALTH="000"
+            HEALTH="${HEALTH} (NodePort)"
+        fi
+    fi
 
     log_info "RHOAI version: ${RHOAI_VERSION}"
     log_info "MaaS API URL:  ${MAAS_URL}"
@@ -1126,7 +1210,11 @@ else
     [ "$SKIP_MODELS" = true ] && log_info "  Deploy models:      ./scripts/deploy-model.sh --model auto"
     [ "$SKIP_VERIFY" = true ] && log_info "  Run verification:   ./scripts/verify-maas.sh"
     [ "$WITH_OBSERVABILITY" = false ] && log_info "  Add observability:  $0 --from-phase 7 --with-observability"
-    [ "$WITH_EXTERNAL_MODELS" = false ] && log_info "  Add external models: $0 --from-phase 8 --with-external-models --external-model-provider openai --external-model-api-key <KEY>"
+    if [ "$DISCONNECTED" = true ]; then
+        log_info "  (Phase 8 external models skipped - not available in disconnected mode)"
+    elif [ "$WITH_EXTERNAL_MODELS" = false ]; then
+        log_info "  Add external models: $0 --from-phase 8 --with-external-models --external-model-provider openai --external-model-api-key <KEY>"
+    fi
     log_info "  RHOAI Dashboard:    https://$(oc get route rhods-dashboard -n redhat-ods-applications -o jsonpath='{.spec.host}' 2>/dev/null || echo '<dashboard-route>')"
 fi
 

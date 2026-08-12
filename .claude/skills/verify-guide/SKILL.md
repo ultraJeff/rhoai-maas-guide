@@ -32,7 +32,7 @@ If any of the three required arguments are missing, use `AskUserQuestion` to req
 | 0 | Cluster login, preflight detection (platform, OCP version, GPU, nodes) | instant |
 | 1 | Full MaaS installation via `./scripts/setup-maas.sh` | 15-30 min |
 | 2 | 15-point E2E via `./manifests/06-verification/verify.sh --no-cleanup` | 3-5 min |
-| 3 | 8 blind-spot regression checks (gateway OOM, MetalLB IP, RHCL pin, etc.) | 1-2 min |
+| 3 | 8 blind-spot regression checks (gateway OOM, MetalLB IP, RHCL version, etc.) | 1-2 min |
 | 4 | AsciiDoc guide commands produce documented output | 1-2 min |
 | 5 | Report generation + save findings to memory | instant |
 
@@ -263,7 +263,7 @@ Verify these labels exist:
 - FAIL for each missing label (report which ones)
 - If namespace llm does not exist, WARN (model may not have been deployed)
 
-#### Check 6: RHCL Pinned to v1.3.4
+#### Check 6: RHCL Version and Approval Mode
 
 ```bash
 RHCL_CSV=$(oc get csv -n openshift-operators --no-headers 2>/dev/null | grep rhcl || echo "")
@@ -271,8 +271,8 @@ RHCL_VERSION=$(echo "$RHCL_CSV" | awk '{print $1}' | grep -oE 'v[0-9]+\.[0-9]+\.
 RHCL_APPROVAL=$(oc get subscription -n openshift-operators -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.installPlanApproval}{"\n"}{end}' 2>/dev/null | grep rhcl || echo "")
 ```
 
-- PASS if RHCL version is v1.3.4 AND installPlanApproval is Manual
-- WARN if RHCL version is v1.4.x (known Wasm plugin issues with v1.4.0)
+- PASS if RHCL version is v1.4.2+ AND installPlanApproval is Automatic
+- WARN if installPlanApproval is Manual (old pin - should be Automatic now)
 - FAIL if RHCL is not installed or version cannot be determined
 
 #### Check 7: HF Xet Storage Behavior
@@ -538,7 +538,7 @@ This list was built from 7 walkthroughs. The blind-spot checks target these spec
 | Help text phase numbering mismatch | v7 | OPEN |
 | MetalLB IP collision with node IP | v6 | FIXED (PR #40) |
 | Kuadrant Wasm plugin startup race | v3 | UPSTREAM |
-| RHCL v1.4.0 Wasm/UI bugs | v5 | MITIGATED (pin to v1.3.4) |
+| RHCL v1.4.0 Wasm/UI bugs | v5 | FIXED (v1.4.2, pin removed) |
 
 ## Troubleshooting
 
