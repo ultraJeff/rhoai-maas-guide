@@ -135,9 +135,29 @@ data:
 
 > **Note:** Gateway annotations like `gateway.istio.io/autoscale-min` and `autoscaling.istio.io/minReplicas` do NOT work — the OpenShift Gateway Controller ignores them. Only the ConfigMap key works.
 
+### 14. Missing Perses Datasources (RHOAI Operator Bug)
+
+The RHOAI operator tries to create `PersesDatasource` CRs for the observability dashboard but fails silently because its manifests omit the `namespace` field in `spec.client.tls.caCert`, which the v1alpha2 CRD validation requires. Error: `namespace is required when type is secret or configmap`.
+
+**Fix:** Manually create both datasources with the correct namespace field:
+
+```bash
+oc apply -k manifests/07-observability/datasources/
+```
+
+This creates `prometheus-datasource` (default, for cluster/model dashboards) and `tempo-datasource` (for traces) in `redhat-ods-monitoring`.
+
+### 15. Missing `prometheus-web-tls-ca` Secret
+
+The RHOAI operator creates a ConfigMap named `prometheus-web-tls-ca` but the MonitoringStack Prometheus pod spec mounts it as a Secret. **Fix:**
+
+```bash
+CA_DATA=$(oc get configmap prometheus-web-tls-ca -n redhat-ods-monitoring -o jsonpath='{.data.service-ca\.crt}')
+oc create secret generic prometheus-web-tls-ca -n redhat-ods-monitoring --from-literal=service-ca.crt="$CA_DATA"
+```
+
 ## Open Issues
 
-- **RHOAI Observability "Cluster" dashboard** shows "No datasource found for kind 'PrometheusDatasource' and name 'undefined'" — missing Perses datasource for the cluster/model panels
 - **istio-pod-monitor** scrapes port 15021 (health port, not metrics) causing permanent 33% TargetDown alert — Kuadrant-managed, can't patch without operator overwriting
 - **MaaS Usage tab** shows 0 — may need time for metrics to accumulate, or a wiring issue
 - **LlamaStack 500 errors on rate limit** — LlamaStack surfaces 429 (Too Many Requests) from MaaS gateway as 500 Internal Server Error

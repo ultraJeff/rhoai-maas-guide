@@ -1,0 +1,26 @@
+apiVersion: perses.dev/v1alpha2
+kind: PersesDatasource
+metadata:
+  name: prometheus-datasource
+  namespace: redhat-ods-monitoring
+spec:
+  client:
+    tls:
+      caCert:
+        certPath: service-ca.crt
+        name: prometheus-web-tls-ca
+        namespace: redhat-ods-monitoring
+        type: configmap
+      enable: true
+  config:
+    default: true
+    display:
+      name: Prometheus
+    plugin:
+      kind: PrometheusDatasource
+      spec:
+        proxy:
+          kind: HTTPProxy
+          spec:
+            url: https://thanos-querier-data-science-thanos-querier.redhat-ods-monitoring.svc:9090
+        scrapeInterval: 30s

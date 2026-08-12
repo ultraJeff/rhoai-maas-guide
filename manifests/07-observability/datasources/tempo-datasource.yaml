@@ -1,0 +1,25 @@
+apiVersion: perses.dev/v1alpha2
+kind: PersesDatasource
+metadata:
+  name: tempo-datasource
+  namespace: redhat-ods-monitoring
+spec:
+  client:
+    tls:
+      caCert:
+        certPath: service-ca.crt
+        name: tempo-data-science-tempomonolithic-serving-cabundle
+        namespace: redhat-ods-monitoring
+        type: configmap
+      enable: true
+  config:
+    default: false
+    display:
+      name: Tempo
+    plugin:
+      kind: TempoDatasource
+      spec:
+        proxy:
+          kind: HTTPProxy
+          spec:
+            url: https://tempo-data-science-tempomonolithic-gateway.redhat-ods-monitoring.svc:8080
